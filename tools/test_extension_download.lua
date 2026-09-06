@@ -73,7 +73,7 @@ package.preload['miuread.http']=function()
         elseif scenario=='mixed_retry' and url:match('^https://m1/') then
             error('timeout')
         elseif url:match('^https://github%.com') then
-            data=scenario=='size' and BAD_SHORT or BAD_SAME
+            data=scenario=='size' and BAD_SHORT or (scenario=='nohash' and GOOD or BAD_SAME)
         elseif url:match('^https://m1/') then
             data=GOOD
         else
@@ -107,6 +107,20 @@ local function run_case(kind)
 end
 run_case('sha')
 run_case('size')
+
+-- beta.17: GitHub does not publish a digest for every historical Release.
+-- A verified official asset may still install after archive/plugin validation;
+-- compute and return a local SHA-256 so the installed record has a durable
+-- fingerprint for later recovery/reinstall checks.
+scenario='nohash'; calls={}
+local nohash_dir=TMP..'/runtime-nohash'; clean(nohash_dir)
+local nohash=D.run({},nohash_dir,{
+    repo='test/nohash',url='https://github.com/test/nohash/releases/download/v1/p.zip',
+    size=#GOOD,sha256='',allow_missing_sha=true,network={mode='direct'},mirrors={},
+})
+assert(nohash and nohash.ok==true,'missing-digest official asset should install after local validation')
+assert(nohash.route_key=='direct','missing-digest case should keep official asset identity')
+assert(nohash.sha256==expected_sha,'missing-digest official asset did not persist local SHA-256 fingerprint')
 
 -- Sub-threshold partials stay route-local. beta.15 may seed another route only
 -- after a checkpoint is large enough to be worth a verified Range resume.

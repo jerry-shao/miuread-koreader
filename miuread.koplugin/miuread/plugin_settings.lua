@@ -90,11 +90,7 @@ local function display_typography_settings(plugin)
 end
 
 local function lockscreen_settings(plugin)
-    local home=plugin:_home_preferences()
-    return {
-        {text="主页锁屏显示最近阅读封面",checked_func=function() return plugin:_home_preferences().lockscreen_recent~=false end,keep_menu_open=true,callback=function() plugin:_toggle_home_lockscreen() end},
-        {text="锁屏封面样式",post_text=plugin:_home_lockscreen_style_label(home),enabled_func=function() return plugin:_home_preferences().lockscreen_recent~=false end,sub_item_table_func=function() return plugin:home_lockscreen_style_menu() end},
-    }
+    return plugin:home_lockscreen_settings_menu()
 end
 
 local function reader_toolbar_row(plugin)
@@ -109,7 +105,7 @@ function M.home_interface(plugin)
         {text="快捷入口",post_text="主页快捷栏 + 下滑控制中心",sub_item_table_func=function() return plugin:home_customization_menu() end},
         reader_toolbar_row(plugin),
         {text="字体与显示",post_text="大小 字体与时间",sub_item_table_func=function() return display_typography_settings(plugin) end},
-        {text="锁屏与封面",post_text=plugin:_home_lockscreen_style_label(plugin:_home_preferences()),sub_item_table_func=function() return lockscreen_settings(plugin) end},
+        {text="锁屏壁纸",post_text=plugin:_home_lockscreen_style_label(plugin:_home_preferences()),sub_item_table_func=function() return lockscreen_settings(plugin) end},
     }
 end
 

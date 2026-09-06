@@ -198,7 +198,12 @@ local function validate_download(path,spec)
     local expected_sha=trim(spec.sha256):lower():gsub("[^0-9a-f]","")
     if expected_sha=="" then
         if spec.allow_missing_sha==true then
-            return {size=size,sha256="",integrity="size+archive"}
+            -- GitHub does not expose a digest for every historical Release.
+            -- Compute and persist our own package fingerprint when possible;
+            -- archive/plugin validation remains mandatory even if this device
+            -- lacks a SHA-256 implementation.
+            local actual=sha256_file(path)
+            return {size=size,sha256=actual or "",integrity=actual and "sha256-recorded" or "size+archive"}
         end
         return nil,"内置扩展缺少 SHA-256 目录记录","catalog_integrity"
     end
