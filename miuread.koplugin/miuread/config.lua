@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.8.0-beta.13",
+    VERSION = "5.8.0-beta.14",
     SCHEMA = 132,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -87,8 +87,19 @@ local C = {
     -- beta.13: progress writes have priority over periodic reading-time writes.
     -- The fence is a soft preemption: an already-dispatched time request is
     -- allowed to return, but no new time request may start while progress waits.
-    PROGRESS_WRITER_SOFT_NOTICE_SECONDS = 4,
-    PROGRESS_WRITER_MAX_WAIT_SECONDS = 115,
+    PROGRESS_WRITER_SOFT_NOTICE_SECONDS = 2,
+    -- A progress write may wait briefly for an already-dispatched reading-time
+    -- request, but never holds Reader close/suspend for a network timeout. The
+    -- exact position is already durable and remains pending if this fence expires.
+    PROGRESS_WRITER_MAX_WAIT_SECONDS = 8,
+    -- v28 service health. Idle heartbeat is cheap /tmp state only. Reporting is
+    -- allowed a longer window because its HTTP dispatch may legitimately block.
+    READ_REPORT_HEARTBEAT_SECONDS = 5,
+    READ_REPORT_HEARTBEAT_STALE_SECONDS = 25,
+    READ_REPORT_REPORTING_STALE_SECONDS = 120,
+    READ_REPORT_HEARTBEAT_STARTUP_GRACE_SECONDS = 20,
+    READ_REPORT_HEALTH_RESTART_DELAY_SECONDS = 1.2,
+    READ_REPORT_MAX_HEALTH_RESTARTS = 2,
     IDLE_TIMEOUT = 600,
     REMOTE_THRESHOLD = 2,
 

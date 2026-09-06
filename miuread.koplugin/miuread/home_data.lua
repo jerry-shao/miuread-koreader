@@ -607,17 +607,17 @@ function HomeData.quick_device_state(force)
             local ok, value = pcall(Device.isKindle, Device)
             is_kindle = ok and value == true
         end
-        local manager_ready = state.connected == true and state.online == true
+        local associated = state.connected == true
             and (not is_kindle or tostring(state.wifi_name or "") ~= "")
-        if health.state == "recovering" and health.age <= 50 then
-            -- During resume do not trust the manager's cached connected bit by
-            -- itself. A real HTTP response (recorded by network_health) clears
-            -- this state immediately; otherwise we keep showing recovery until
-            -- the grace window expires.
-            state.network_phase = "recovering"
-        elseif manager_ready then
-            NetworkHealth.note_success("network-manager")
+        if associated then
+            -- beta.14: association + a real Kindle SSID is authoritative for UI
+            -- state. Do not leave Home stuck on “恢复中” after Reader/network
+            -- manager already sees the active network. Internet reachability is
+            -- still represented separately by state.online.
+            NetworkHealth.note_success("network-manager-associated")
             state.network_phase = "connected"
+        elseif health.state == "recovering" and health.age <= 50 then
+            state.network_phase = "recovering"
         elseif health.state == "down" and health.age <= 20 then
             state.network_phase = "unavailable"
         elseif state.wifi_on == true then

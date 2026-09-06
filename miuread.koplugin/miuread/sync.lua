@@ -19,7 +19,7 @@ Sync.__index = Sync
 local legacy_daemon_retired = false
 
 local CONTEXT_MAX_AGE = 15 * 60
-local READ_REPORT_SERVICE_VERSION = 27
+local READ_REPORT_SERVICE_VERSION = 28
 local FIRST_REPORT_DELAY = 15
 local FINAL_REPORT_MIN_SECONDS = 10
 local PRECISE_POSITION_LEAD_SECONDS = 12
@@ -2887,7 +2887,7 @@ function Sync:begin_progress_write(reason, callback)
             self:_write_daemon_control(true,true,{progress_fence=false})
         end
         callback(ok,result)
-    end,math.max(30,tonumber(Config.PROGRESS_WRITER_MAX_WAIT_SECONDS) or 115))
+    end,math.max(4,tonumber(Config.PROGRESS_WRITER_MAX_WAIT_SECONDS) or 8))
     return true
 end
 
@@ -3097,6 +3097,15 @@ local function process_alive(pid)
     return ok and result == 0
 end
 
+local function signal_process(pid,signal)
+    pid=tonumber(pid); signal=tonumber(signal) or 15
+    if not pid or pid<=1 then return false end
+    local ffi=process_helpers()
+    if not ffi then return false end
+    local ok,result=pcall(function() return ffi.C.kill(pid,signal) end)
+    return ok and result==0
+end
+
 local function read_json_file(path)
     local raw = U.read_file(path, true)
     if not raw then return nil end
@@ -3129,7 +3138,8 @@ function Sync:_retire_legacy_daemon()
         local owner_path=prefix..".owner.json"
         retired[#retired+1]={
             job=prefix..".job.json",control=prefix..".control.json",status=prefix..".status.json",
-            context=prefix..".context.json",stop=prefix..".stop",owner=owner_path,lock=prefix..".lock",
+            context=prefix..".context.json",heartbeat=prefix..".heartbeat",
+            stop=prefix..".stop",owner=owner_path,lock=prefix..".lock",
         }
         local generation=2147483000
         U.atomic_write(prefix..".job.json",Json.encode({
@@ -3149,7 +3159,7 @@ function Sync:_retire_legacy_daemon()
             local owner=read_json_file(paths.owner)
             if not owner or not process_alive(owner.pid) then
                 os.remove(paths.job); os.remove(paths.control); os.remove(paths.status)
-                os.remove(paths.context); os.remove(paths.stop); os.remove(paths.owner)
+                os.remove(paths.context); os.remove(paths.heartbeat); os.remove(paths.stop); os.remove(paths.owner)
                 remove_lock_dir(paths.lock)
             end
         end
@@ -3169,6 +3179,7 @@ function Sync:_daemon_paths()
         control = base .. ".control.json",
         status = base .. ".status.json",
         context = base .. ".context.json",
+        heartbeat = base .. ".heartbeat",
         stop = base .. ".stop",
         owner = base .. ".owner.json",
         lock = base .. ".lock",
@@ -3184,10 +3195,75 @@ function Sync:_cleanup_daemon_files(daemon)
         os.remove(paths.control)
         os.remove(paths.status)
         os.remove(paths.context)
+        os.remove(paths.heartbeat)
         os.remove(paths.stop)
         os.remove(paths.owner)
         remove_lock_dir(paths.lock)
     end
+end
+
+function Sync:_daemon_health(daemon)
+    if not daemon or not daemon.paths or not process_alive(daemon.pid) then return false,"process_exited" end
+    local now=os.time()
+    local raw=U.read_file(daemon.paths.heartbeat,true)
+    local beat=tonumber(raw or 0) or 0
+    local owner=read_json_file(daemon.paths.owner) or {}
+    local started=tonumber(owner.started_at or 0) or 0
+    local startup_grace=math.max(5,tonumber(Config.READ_REPORT_HEARTBEAT_STARTUP_GRACE_SECONDS) or 20)
+    if beat<=0 then
+        if started>0 and now-started<=startup_grace then return true,"starting" end
+        return false,"heartbeat_missing"
+    end
+    local status=read_json_file(daemon.paths.status) or {}
+    local reporting=tostring(status.state or "")=="reporting"
+    local limit=reporting and math.max(30,tonumber(Config.READ_REPORT_REPORTING_STALE_SECONDS) or 120)
+        or math.max(10,tonumber(Config.READ_REPORT_HEARTBEAT_STALE_SECONDS) or 25)
+    local age=math.max(0,now-beat)
+    if age>limit then
+        return false,(reporting and "reporting_stalled:" or "heartbeat_stale:")..tostring(age)
+    end
+    return true,reporting and "reporting" or "healthy"
+end
+
+function Sync:_restart_unhealthy_daemon(reason)
+    local daemon=self.daemon
+    if not daemon or self.daemon_health_restart_pending==true then return false end
+    self.daemon_health_restart_count=(tonumber(self.daemon_health_restart_count) or 0)+1
+    local max_restarts=math.max(1,tonumber(Config.READ_REPORT_MAX_HEALTH_RESTARTS) or 2)
+    local was_active=daemon.active==true
+    local old_pid=tonumber(daemon.pid)
+    local paths=daemon.paths
+    logger.warn("[MiuRead][ReadReport] unhealthy service detected",
+        "pid=",tostring(old_pid or "-"),"reason=",tostring(reason or "unknown"),
+        "restart=",tostring(self.daemon_health_restart_count).."/"..tostring(max_restarts))
+    self:cancel_writer_barrier_waits("read_report_health_restart")
+    self.progress_write_fence=false
+    self.progress_write_fence_seq=0
+    if paths and paths.stop then U.atomic_write(paths.stop,"1",true) end
+    if old_pid then signal_process(old_pid,15) end
+    self.state="stopped"
+    self.daemon=nil
+    if self.daemon_health_restart_count>max_restarts then
+        self.daemon_health_restart_pending=false
+        self.last_error="阅读时间后台服务连续无响应"
+        self.last_stage="本次阅读会话已停止自动重启；重新打开书籍后会再次尝试"
+        return false
+    end
+    self.daemon_health_restart_pending=true
+    UIManager:scheduleIn(math.max(.5,tonumber(Config.READ_REPORT_HEALTH_RESTART_DELAY_SECONDS) or 1.2),function()
+        if old_pid and process_alive(old_pid) then signal_process(old_pid,9) end
+        if paths then
+            os.remove(paths.job); os.remove(paths.control); os.remove(paths.status); os.remove(paths.context)
+            os.remove(paths.heartbeat); os.remove(paths.stop); os.remove(paths.owner); remove_lock_dir(paths.lock)
+        end
+        self.daemon_health_restart_pending=false
+        if was_active and self.store:preferences().sync.time_enabled and not self.suspended and self:record() then
+            self:start("service_health_restart")
+        else
+            self:_ensure_daemon()
+        end
+    end)
+    return true
 end
 
 function Sync:_attach_existing_daemon(paths, owner)
@@ -3206,6 +3282,13 @@ function Sync:_attach_existing_daemon(paths, owner)
         auth_revision=math.max(0,tonumber(job.auth_revision or 0) or 0),
         account_vid=tostring(job.account_vid or ""),
     }
+    local healthy,health_reason=self:_daemon_health(self.daemon)
+    if not healthy then
+        U.atomic_write(paths.stop,"1",true); signal_process(owner.pid,15)
+        self.daemon=nil
+        logger.warn("[MiuRead][ReadReport] stale service reuse refused","reason=",tostring(health_reason))
+        return false
+    end
     self.daemon_status_stamp = nil
     self:_schedule_daemon_poll(10)
     logger.info("[MiuRead][ReadReport] lightweight service reused", "pid=", tostring(owner.pid))
@@ -3213,7 +3296,12 @@ function Sync:_attach_existing_daemon(paths, owner)
 end
 
 function Sync:_ensure_daemon()
-    if self.daemon and process_alive(self.daemon.pid) then return true end
+    if self.daemon and process_alive(self.daemon.pid) then
+        local healthy,reason=self:_daemon_health(self.daemon)
+        if healthy then return true end
+        self:_restart_unhealthy_daemon(reason)
+        return false,"后台阅读时间服务正在恢复"
+    end
     if self.daemon then self:_cleanup_daemon_files(self.daemon); self.daemon=nil end
     if type(FFIUtil.runInSubProcess) ~= "function" then
         self.last_error = "当前 KOReader 不支持后台阅读时间服务"
@@ -3236,6 +3324,7 @@ function Sync:_ensure_daemon()
 
     U.atomic_write(paths.control, Json.encode({active=false,generation=0,controller_token="",updated_at=os.time()}), true)
     os.remove(paths.stop)
+    os.remove(paths.heartbeat)
     local service_job = {
         parent_pid = current_pid(),
         service_version = READ_REPORT_SERVICE_VERSION,
@@ -3244,6 +3333,7 @@ function Sync:_ensure_daemon()
         control_path = paths.control,
         status_path = paths.status,
         context_path = paths.context,
+        heartbeat_path = paths.heartbeat,
         stop_path = paths.stop,
         owner_path = paths.owner,
         lock_path = paths.lock,
@@ -3641,6 +3731,7 @@ function Sync:_import_daemon_status(force)
     end
 
     if status.accepted then
+        self.daemon_health_restart_count=0
         self.pending_report_status_at=tonumber(status.completed_at) or os.time()
         self.state = daemon.active and "waiting" or "stopped"
         self.session_uploads = self.session_uploads + 1
@@ -3827,6 +3918,11 @@ function Sync:_schedule_daemon_poll(delay)
             return
         end
         self:_maybe_refresh_precise_position()
+        local healthy,health_reason=self:_daemon_health(daemon)
+        if not healthy and process_alive(daemon.pid) then
+            self:_restart_unhealthy_daemon(health_reason)
+            return
+        end
         if not process_alive(daemon.pid) then
             local was_active = daemon.active
             logger.warn("[MiuRead][ReadReport] lightweight service exited unexpectedly")
@@ -4165,6 +4261,7 @@ function Sync:wait_writer_barrier(seq,callback,timeout)
             done=true
             logger.info("[MiuRead][ReadReport] writer barrier wait cancelled",
                 "seq=",tostring(seq),"generation=",tostring(wait_generation))
+            callback(false,{state="cancelled",reason="service_restarted"})
             return
         end
         if self:writer_barrier_done(seq) then
@@ -4473,6 +4570,7 @@ function Sync:on_reader_ready()
     self.suspended = false
     self.session_uploads = 0
     self.daemon_restart_count = 0
+    self.daemon_health_restart_count = 0
     self.last_upload = 0
     self.session_started_at = os.time()
     self:_ensure_reading_time_ids(true,true)
@@ -4571,6 +4669,7 @@ function Sync:on_resume(_slept)
     self:_import_daemon_status(true)
     self.suspended = false
     self.last_upload = 0
+    self.daemon_health_restart_count = 0
     self.session_started_at = os.time()
     self:_ensure_reading_time_ids(false,true)
     self.reading_end_finalized=false

@@ -136,6 +136,7 @@ function Service.run(job)
     local status_path = assert(job.status_path, "missing status path")
     local context_path = assert(job.context_path, "missing context path")
     local stop_path = assert(job.stop_path, "missing stop path")
+    local heartbeat_path = tostring(job.heartbeat_path or "")
     local owner_path = job.owner_path
     local lock_path = job.lock_path
     local reader_busy_path = tostring(job.reader_busy_path or "")
@@ -143,6 +144,19 @@ function Service.run(job)
     local poll_interval = math.max(0.5, tonumber(job.poll_interval) or 1)
 
     lower_priority()
+
+    local heartbeat_interval=math.max(2,tonumber(Config.READ_REPORT_HEARTBEAT_SECONDS) or 5)
+    local last_heartbeat=0
+    local function heartbeat(force)
+        if heartbeat_path=="" then return false end
+        local now=os.time()
+        if force==true or now-last_heartbeat>=heartbeat_interval then
+            last_heartbeat=now
+            return U.atomic_write(heartbeat_path,tostring(now),true)
+        end
+        return true
+    end
+    heartbeat(true)
 
     local generation = 0
     local sequence = 0
@@ -281,6 +295,7 @@ function Service.run(job)
             force_context = consecutive_unconfirmed >= 2,
         }
         local attempted_at = os.time()
+        heartbeat(true)
         write_service_status({
             generation=generation,seq=sequence,state="reporting",accepted=nil,
             attempted_at=attempted_at,elapsed_seconds=elapsed,final_flush=final_flush==true,
@@ -288,6 +303,7 @@ function Service.run(job)
             writer_barrier_seq=tonumber(control.writer_barrier_seq or 0) or 0,
         })
         local ok, result = pcall(Adapter.run, report_job)
+        heartbeat(true)
         local completed_at = os.time()
         -- The elapsed segment ends when the request is dispatched, not when
         -- the HTTP response returns. Reading continues while the request is in
@@ -429,6 +445,7 @@ function Service.run(job)
         return due
     end
 
+    heartbeat(true)
     write_service_status({
         generation = 0,
         seq = 0,
@@ -438,6 +455,7 @@ function Service.run(job)
     })
 
     while true do
+        heartbeat(false)
         if U.file_exists(stop_path) or not parent_alive(parent_pid) then break end
 
         local control = read_json(control_path)
@@ -636,6 +654,7 @@ function Service.run(job)
         sleep(poll_interval)
     end
 
+    heartbeat(true)
     write_service_status({
         generation = generation,
         seq = sequence,
@@ -647,6 +666,7 @@ function Service.run(job)
         local owner = read_json(owner_path)
         if not owner or tonumber(owner.pid) == own_pid() then os.remove(owner_path) end
     end
+    if heartbeat_path~="" then os.remove(heartbeat_path) end
     remove_lock_dir(lock_path)
     return true
 end
