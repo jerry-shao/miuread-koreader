@@ -350,7 +350,22 @@ function M.capture(ui, record, catalog)
     local local_row, uid, idx, standalone, chapter_error = local_chapter(record, toc_index)
     if not local_row then return nil, chapter_error end
     local catalog_row, catalog_error = catalog_position(catalog, uid, idx)
-    if not catalog_row then return nil, catalog_error end
+    local chapter_only = false
+    if not catalog_row then
+        -- beta.13: a partial/standalone EPUB can still capture an exact Web
+        -- Reader source coordinate before the whole-book catalog is available.
+        -- Whole-book progress is completed later, after a trusted catalog is
+        -- recovered. Full-book EPUBs deliberately keep the old fail-closed path.
+        local partial = standalone == true or (record.record and record.record.partial_range == true)
+        if not partial or tostring(catalog_error) ~= "full_catalog_missing" then
+            return nil, catalog_error
+        end
+        catalog_row = {
+            chapter = local_row, index = tonumber(idx) or toc_index, before = 0,
+            words = chapter_words(local_row), total = 0,
+        }
+        chapter_only = true
+    end
     if catalog_row.words > MAX_CHAPTER_WORDS then return nil, "chapter_too_large_for_precision" end
 
     local before_xp = retreat_words(document, xp, 12)
@@ -392,6 +407,9 @@ function M.capture(ui, record, catalog)
         total_word_count = catalog_row.total,
         words_before = catalog_row.before,
         standalone = standalone == true,
+        partial_source = standalone == true or (record.record and record.record.partial_range == true),
+        whole_progress_available = chapter_only ~= true,
+        catalog_pending = chapter_only == true,
         anchor_text = anchor_text,
         context_before = context_before,
         context_after = context_after,
@@ -401,7 +419,7 @@ function M.capture(ui, record, catalog)
         book_version = tonumber(record.record and record.record.progress_source_book_version)
             or tonumber(record.book and (record.book.version or record.book.bookVersion))
             or tonumber(record.record and (record.record.book_version or record.record.bookVersion)) or 0,
-        chapter_candidates = catalog_neighbor_candidates(catalog, catalog_row.index, catalog_row.total),
+        chapter_candidates = chapter_only and {} or catalog_neighbor_candidates(catalog, catalog_row.index, catalog_row.total),
     }
 end
 

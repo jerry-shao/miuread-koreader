@@ -1,68 +1,84 @@
-# 5.8.0-beta.12 verification
+# 5.8.0-beta.13 verification
 
-Scope: crash-backed fixes for issues #86, #91 and #92. The beta.11 Extension Engine v4 is kept unchanged apart from version/schema integration.
+Scope: restore standalone/partial EPUB whole-book progress synchronization, fix #94 progress-vs-reading-time writer contention, make progress persistence dispatch-aware, and keep the already-stable beta.12 full-book/Reader behavior unchanged.
 
-## #91 — KPW6 extreme lag / settings growth
-
-The supplied #91 log repeatedly records `settings flush failed` with a generated `miuread.lua` around line 100,146–100,229 and `chunk has too many syntax levels`. It also records a fresh book download started with about 95 MiB available memory immediately before KOReader was killed.
+## Standalone / partial progress regression
 
 Implemented safeguards:
 
-- Schema **131** compacts historical session/report context storage. A complete chapter catalog has one durable owner (`library[bookId].catalog`) instead of being duplicated in every session/report context.
-- Migration preserves exact pending progress and user/account state. If an old session contains the only complete catalog, it is promoted to the library record before the duplicate session copy is removed.
-- Future `save_session` calls apply the same bounded persistent shape, so the old chapter arrays cannot simply grow back after migration.
-- Every normal settings flush compacts merged session state before serialization. If serialization specifically fails with `too many syntax levels`, an emergency compaction removes regenerable duplicate/cache objects and retries one atomic write; the previous settings file is retained if the retry still fails.
-- The downloader no longer stores the same full chapter map in both the library and session records.
-- Fresh heavy book downloads run GC and a memory preflight before worker state/fork. Below **96 MiB** the task is deferred with a user-visible message and existing checkpoints are kept, instead of starting a worker in the same low-memory state seen immediately before the supplied crash.
+- A standalone or partial EPUB can capture the exact WeRead native `chapter + co` coordinate before a trusted whole-book catalog is available. Whole-book `progress` is completed later from the verified catalog; the local partial EPUB percentage is never uploaded as whole-book progress.
+- New partial downloads keep the complete WeRead catalog separate from the selected local chapters and keep time-only read reporting enabled.
+- Schema **132** safely promotes legacy partial catalogs only when the stored `core_catalog_hash` matches the actual catalog and the catalog is larger than the local partial selection. An ambiguous one-chapter catalog is not auto-promoted; it must be remotely confirmed once.
+- Missing/untrusted catalogs are recovered through the existing WeRead context path and then persisted with explicit `catalog_complete`, `catalog_chapter_count`, and `core_catalog_hash` metadata.
+- Manual progress, Reader close, Home return, and suspend/finalizer paths preserve `pending_progress_coordinate` when exact chapter/co is available but whole-book percentage is not yet ready. Home recovery later completes the percentage and continues the same durable transaction.
 
-Dynamic state-repair test (`tools/test_store_repair.lua`) passed. It creates a schema-130 store containing a 320-chapter duplicated catalog and deeply nested historical junk, migrates to schema 131, verifies the canonical catalog and exact pending progress survive, verifies duplicate contexts are removed, and confirms a subsequent session save cannot regrow them.
+## #94 — progress writer vs reading-time writer
 
-## #92 — Kobo Wi-Fi after suspend/resume
+- Progress writes now place a soft fence in front of the periodic reading-time service. No new time request can start while progress is waiting.
+- An already-dispatched time request is never forcibly killed/replayed. The progress fence waits for that request to return, then takes ownership of `/web/book/read`; the previous hard 15-second `progress_writer_busy` failure path is no longer the normal contention behavior.
+- The maximum soft wait is bounded at 115 seconds, longer than the compatibility worker's request timeout. If the writer still cannot be acquired, the exact progress snapshot remains durable and is classified as definitely unsent rather than being discarded.
 
-The supplied #92 log shows an underlying Kobo/KOReader network inconsistency (`dhcpcd not running`) and later remains `radio=true`, `connected=false`, `online=false` through the 52-second observation point. MiuRead must not claim to repair the firmware daemon itself.
+## Dispatch-aware pending state
 
-Implemented MiuRead-side recovery:
+Progress is persisted as one of three effective transport states:
 
-- The pre-suspend Wi-Fi **intent** is remembered before KOReader tears networking down for Kobo suspend.
-- On resume, when Wi-Fi was intended to remain available, MiuRead now calls KOReader's own `NetworkMgr.restoreWifiAsync()` and `scheduleConnectivityCheck()` path instead of merely observing `isWifiOn()`.
-- If KOReader already has a connection attempt in progress, MiuRead reuses it instead of creating a competing recovery.
-- Recovery is bounded and observes `.8 / 3 / 6 / 12 / 24 / 40 / 48 s`, covering KOReader's documented asynchronous restore window. Success releases the recovering state; failure stops automatic waiting and exposes a manual reconnect message.
-- MiuRead's recovery code contains no direct network-daemon shell manipulation (`dhcpcd`, `wpa_supplicant`, `ifconfig`, etc.). The device-specific work stays owned by KOReader.
-- While networking is recovering/down, automatic remote Home jobs (shelf, remote metadata, remote covers and WeRead stats) are gated so they cannot each spend tens of seconds failing on an interface that is not connected. Local/cache UI remains available.
+- `pending_send`: the request is definitely unsent and may be resumed automatically.
+- `submitted`: the request was sent, or dispatch outcome is uncertain; recovery performs cloud readback only and does **not** replay the same position.
+- `verified`: cloud chapter/co has confirmed the submitted position; pending state is cleared.
 
-This fixes MiuRead's recovery/control-flow gap. Real Kobo hardware is still required to determine whether KOReader's own device backend can recover a particular firmware/launcher state; beta.12 deliberately does not bypass KOReader and take ownership of Kobo networking.
+Cloud confirmation latency, old position readback, or temporary `0/0` does not erase the local exact position. The latest exact position for a book supersedes older pending positions.
 
-## #86 — Home / Wi-Fi / shelf latency
+## Reading-time safety for chapter downloads
 
-The supplied #86 log contains old 5.6 paths where a Home section switch takes about 5 seconds even though the resulting layer itself is cheap, plus network-unreachable periods. The major Home cache/foreground-priority/QuickPanel changes were already introduced in beta.6/beta.7 and remain in beta.12.
+- Historical `partial_range` downloads are migrated from `read_report_enabled=false` to safe time-only reporting when normal sync remains enabled.
+- Time-only reporting repeats an already safe cloud position; it does not submit the local partial-document percentage.
+- The service carries forward only seconds that are **provably unsent**. Once `/web/book/read` has been entered, the attempted interval is never replayed merely because the response was lost.
+- Legacy pending reading-time debt from older builds has no dispatch proof and is therefore cleared during schema-132 migration instead of being replayed and potentially double-counted.
 
-This release adds the missing recovery gate relevant to #86: automatic remote work does not start while Wi-Fi is still recovering or recently down. It does not attempt to modify third-party plugins' own HTTP loops (for example, Z-Library network errors seen in the log are emitted by that plugin, not by MiuRead).
+## Normal full-book / Reader regression boundary
 
-A real-device #86 regression test remains necessary because the residual cost of KOReader layout/e-ink rendering cannot be reproduced by source-level tests.
+Source-level function comparison against the supplied 5.8.0-beta.12 source passed **11/11** unchanged core functions:
+
+- `Sync:position`
+- `Sync:local_position`
+- `Sync:_prefer_inverse_cloud_mapping`
+- `Plugin:_remote_matches`
+- `Plugin:_verify_progress_submission`
+- `Plugin:onReaderReady`
+- `Plugin:onCloseDocument`
+- `Plugin:onResume`
+- `Plugin:onSuspend`
+- `Plugin:_begin_koreader_exit`
+- `Plugin:_quiesce_download_for_exit`
+
+Therefore beta.13 does not replace the existing full-book position algorithm, cloud matching/verification algorithm, KOReader Reader lifecycle, CRE handling, input handling, or native Exit/Restart download quiesce path. #87/#90 remain real-device regression items rather than another speculative Reader rewrite.
 
 ## Automated verification
 
-- Static/invariant suite: **74/74 passed** (`python tools/verify_beta12.py`).
-- Shipped Lua syntax: **136/136 passed** as part of the suite.
+- `python tools/verify_beta13.py`: **100/100 passed**.
+- Shipped Lua syntax: **136/136 passed** using `texluac -p`.
 - Extension catalog regression: PASS — 18 deterministic packages.
 - Extension download fault model: PASS.
 - Extension installer transaction/rollback/path-safety model: PASS.
-- Store schema-131/session-compaction dynamic test: PASS.
-- Static network guard confirms the resume path uses KOReader-owned restore/connectivity APIs and does not directly execute network-daemon commands.
+- Store migration/compaction regression: PASS, including schema-132 partial catalog promotion, old partial read-report enablement, pending progress normalization, and non-replay of ambiguous legacy reading-time debt.
+- Standalone/partial whole-book fault model: PASS.
+- Progress transport state model (`pending_send` / `submitted` / `verified`): PASS.
 
-## Hardware validation required before stable promotion
+## Hardware validation still required
 
-1. **KPW6 / #91:** upgrade the affected long-lived install without deleting settings; verify the migration completes, normal settings writes resume, Home/QuickPanel/shelf switching no longer accumulates tens-of-seconds delays, and a low-memory fresh download is deferred rather than killing KOReader.
-2. **Kobo Glo HD / #92:** Wi-Fi initially connected → Home → suspend → wake. Verify the panel enters recovering, KOReader restoration reconnects without returning to Nickel, and automatic shelf/stats workers remain parked until connectivity is actually restored. Also test the bounded failure message when the underlying KOReader backend cannot restore.
-3. **KPW6 / #86:** repeat source/page switching and QuickPanel interaction on the original device. Cached/local navigation must remain usable while networking is unavailable.
+Source/fault-model checks cannot emulate WeRead response timing, Kindle process scheduling, or KOReader input-device failure. Before stable promotion, real-device validation should cover:
 
-These source/fault-model gates verify the MiuRead changes; they do not claim to emulate Kobo firmware networking or Kindle OOM behavior exactly.
+1. **Standalone chapter:** download one chapter, read to several positions, manually upload, return Home, close/suspend, and verify the phone/Web WeRead location follows the same chapter and approximate text position.
+2. **Legacy standalone chapter:** upgrade without redownloading; verify a hash-valid stored whole-book catalog is promoted and progress resumes automatically.
+3. **Catalog recovery:** force/remove trusted catalog metadata while keeping a partial EPUB; verify exact chapter/co is retained first, the full catalog is recovered later, and the same pending transaction continues.
+4. **#94:** trigger manual/end-of-reading progress while the reading-time service is actively writing. There must be no lost local position and no automatic replay of a request whose dispatch is uncertain.
+5. **#87/#90:** KPW4/KPW5 open → page-turn → suspend/resume → Home. Confirm no regression in Reader rebuild/white-screen behavior; if `Broken pipe` recurs, capture a fresh beta.13 log because beta.13 intentionally does not modify KOReader's input subsystem.
 
 ## Built beta package
 
-- Full install ZIP: `miuread-v5.8.0-beta.12-full.zip`
-- Size: **1,917,935 bytes**
-- SHA-256: `3767fc6ec1614af17a25969008aafb83d41c04372e3d695504ae31649fed0630`
-- Runtime ZIP entries: **258**, all under `miuread.koplugin/`.
+- Full install ZIP: `miuread-v5.8.0-beta.13-full.zip`
+- Size: **1,915,272 bytes**
+- SHA-256: `ffe3a41a59152af705562740a1681cac70343494477e7638b04f73c01ffb3a78`
+- Runtime ZIP entries: **236**, all under `miuread.koplugin/`.
 - Python `ZipFile.testzip()` and `unzip -t` both pass.
-- Manifest version/size/SHA match the generated full ZIP.
+- `update.json` version/size/SHA match the generated full ZIP.

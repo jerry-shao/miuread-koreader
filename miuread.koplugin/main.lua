@@ -17985,7 +17985,7 @@ function Plugin:_download_summary(rec,opt)
     lines[#lines+1]="保存位置："..tostring(rec.file or "")
     lines[#lines+1]="打开一次后会出现在 KOReader 最近阅读中"
     if rec and rec.partial_range==true then
-        lines[#lines+1]="章节版不会上传整书阅读进度，避免局部比例覆盖云端位置。"
+        lines[#lines+1]="章节版会按微信读书完整目录换算整书进度；不会直接使用局部 EPUB 百分比。"
     end
     if preview and preview_mode=="info" then lines[#lines+1]="本文件只包含书籍信息和权限说明。" end
     return table.concat(lines,"\n")
@@ -21535,6 +21535,7 @@ function Plugin:_home_sync_summary(force)
     local pending_progress_states={
         waiting_network=true,uploading=true,retrying=true,finalizing=true,upload_unconfirmed=true,upload_failed=true,
         verifying_upload=true,deferred=true,verification_required=true,remote_jump_unconfirmed=true,
+        submitted=true,settling=true,mapping_preparing=true,
     }
     local now=os.time()
     for id,session in pairs(sessions) do
@@ -21543,10 +21544,14 @@ function Plugin:_home_sync_summary(force)
             local has_book_record=type(library[tostring(id)])=="table"
             if session.sync_repair_required==true and has_book_record then repair_required=repair_required+1 end
             local pending=type(session.pending_progress)=="table" and session.pending_progress or nil
+            local coordinate=type(session.pending_progress_coordinate)=="table" and session.pending_progress_coordinate or nil
             local pending_seq=pending and (tonumber(pending.progress_sequence or 0) or 0) or 0
+            local coordinate_seq=coordinate and (tonumber(coordinate.progress_sequence or 0) or 0) or 0
             local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
             if pending and pending_seq>0 and verified_seq>=pending_seq then pending=nil end
+            if coordinate and coordinate_seq>0 and verified_seq>=coordinate_seq then coordinate=nil end
             if pending and not has_book_record then pending=nil end
+            if coordinate and not has_book_record then coordinate=nil end
             local replayable=self:_progress_snapshot_replayable(pending)
             local worker_age=now-(tonumber(session.progress_worker_updated_at or 0) or 0)
             local worker_alive=session.progress_worker_active==true and worker_age>=0 and worker_age<=90
@@ -21559,14 +21564,16 @@ function Plugin:_home_sync_summary(force)
             -- work must carry the exact chapter/co snapshot that can be replayed.
             local live_without_snapshot=has_book_record and worker_alive
                 and (state=="uploading" or state=="retrying" or state=="verifying_upload")
-            if pending_progress_states[state] and (pending or live_without_snapshot) then progress=progress+1 end
-            if pending then
+            if pending_progress_states[state] and (pending or coordinate or live_without_snapshot) then progress=progress+1 end
+            if coordinate and not pending then
+                progress_waiting=progress_waiting+1
+            elseif pending then
                 if not replayable then
                     progress_waiting=progress_waiting+1
                 elseif state=="upload_failed" then
                     progress_failed=progress_failed+1
                 elseif state=="upload_unconfirmed" or state=="remote_jump_unconfirmed"
-                    or state=="deferred" or state=="verification_required" then
+                    or state=="deferred" or state=="verification_required" or state=="submitted" or state=="settling" then
                     -- These states all describe a durable exact snapshot that
                     -- has not yet been confirmed by cloud readback. Surface
                     -- them consistently as “进度待确认”, not “待同步”.
@@ -21658,25 +21665,31 @@ function Plugin:_progress_sync_issue_items()
     local library=self:_persisted_library()
     local items={}
     local labels={
-        upload_unconfirmed="等待云端确认",verifying_upload="正在确认",
+        upload_unconfirmed="等待云端确认",verifying_upload="正在确认",submitted="等待云端确认",settling="等待云端确认",
         waiting_network="等待网络",upload_failed="需要处理",
         remote_jump_unconfirmed="位置待确认",verification_required="需要确认",
-        uploading="正在上传",retrying="正在重试",finalizing="正在提交",deferred="等待确认",
+        uploading="正在上传",retrying="正在重试",finalizing="正在提交",deferred="等待确认",mapping_preparing="正在换算整书位置",
     }
     local pending_states={
         upload_unconfirmed=true,verifying_upload=true,waiting_network=true,upload_failed=true,
         remote_jump_unconfirmed=true,verification_required=true,uploading=true,retrying=true,finalizing=true,deferred=true,
+        submitted=true,settling=true,mapping_preparing=true,
     }
     local now=os.time()
     for id,session in pairs(sessions) do
         if type(session)=="table" then
             local state=tostring(session.progress_sync_state or "")
             local pending_progress=type(session.pending_progress)=="table" and U.copy(session.pending_progress) or nil
+            local pending_coordinate=type(session.pending_progress_coordinate)=="table" and U.copy(session.pending_progress_coordinate) or nil
             local pending_seq=pending_progress and (tonumber(pending_progress.progress_sequence or 0) or 0) or 0
+            local coordinate_seq=pending_coordinate and (tonumber(pending_coordinate.progress_sequence or 0) or 0) or 0
             local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
             if pending_progress and pending_seq>0 and verified_seq>=pending_seq then pending_progress=nil end
-            if pending_states[state] and pending_progress and type(library[tostring(id)])=="table" then
+            if pending_coordinate and coordinate_seq>0 and verified_seq>=coordinate_seq then pending_coordinate=nil end
+            if pending_states[state] and (pending_progress or pending_coordinate) and type(library[tostring(id)])=="table" then
                 local replayable,replay_reason=self:_progress_snapshot_replayable(pending_progress)
+                local coordinate_only=pending_progress==nil and pending_coordinate~=nil
+                if coordinate_only then replayable=false; replay_reason="等待完整目录换算" end
                 local worker_age=now-(tonumber(session.progress_worker_updated_at or 0) or 0)
                 local worker_alive=session.progress_worker_active==true and worker_age>=0 and worker_age<=90
                 if (state=="uploading" or state=="retrying" or state=="verifying_upload" or state=="finalizing") and not worker_alive then
@@ -21686,25 +21699,36 @@ function Plugin:_progress_sync_issue_items()
                 local title=U.trim(tostring(book.title or book.bookTitle or ""))
                 if title=="" then title="书籍 "..tostring(id) end
                 local reason=tostring(session.progress_sync_message or session.progress_upload_error or "待处理")
-                local localp=tonumber(session.progress_local_percent) or tonumber(pending_progress.progress)
+                local localp=tonumber(session.progress_local_percent) or tonumber(pending_progress and pending_progress.progress)
                 local can_replay=replayable==true and state~="uploading" and state~="retrying"
                     and state~="verifying_upload" and state~="finalizing"
-                local pending_reason=tostring(pending_progress.pending_reason or session.progress_last_verify_reason or "")
+                local upload_state=tostring(session.progress_upload_state or "")
+                local can_send=can_replay and upload_state=="pending_send"
+                local can_verify=can_replay and not can_send
+                local pending_reason=tostring((pending_progress and pending_progress.pending_reason)
+                    or (pending_coordinate and pending_coordinate.pending_reason) or session.progress_last_verify_reason or "")
                 local explicit_mismatch=pending_reason=="chapter_offset_mismatch" or pending_reason=="chapter_mismatch"
                     or pending_reason=="position_mismatch" or pending_reason=="remote_position_mismatch"
                 local can_resubmit=replayable==true and (session.progress_resubmit_allowed==true
                     or state=="upload_failed" or explicit_mismatch)
                 items[#items+1]={
                     book_id=tostring(id),title=title,state=state,
-                    state_label=replayable and (labels[state] or "待处理") or "需要打开本书确认",
-                    reason=replayable and reason or "本地只剩不完整的位置记录，无法安全重传",
+                    state_label=coordinate_only and "正在换算整书位置"
+                        or (can_send and "等待上传" or (replayable and (labels[state] or "待处理") or "需要打开本书确认")),
+                    reason=coordinate_only and "精确章节位置已保存，等待补全整书目录"
+                        or (can_send and "精确位置已保存，但请求尚未发送"
+                        or (replayable and reason or "本地只剩不完整的位置记录，无法安全重传")),
                     local_percent=localp,
-                    can_verify=can_replay,
+                    can_verify=can_verify,
+                    can_send=can_send,
                     can_resubmit=can_resubmit,
+                    upload_state=upload_state,
                     replayable=replayable==true,
                     replay_reason=replay_reason,
                     pending_reason=pending_reason,
-                    pending_progress=pending_progress,
+                    pending_progress=pending_progress,pending_coordinate=pending_coordinate,
+                    can_recover_coordinate=coordinate_only,
+                    last_verify_at=tonumber(session.progress_last_verify_at or 0) or 0,
                     decided_at=tonumber(session.progress_decided_at or session.progress_upload_pending_at or 0) or 0,
                 }
             end
@@ -21715,6 +21739,130 @@ function Plugin:_progress_sync_issue_items()
         return (tonumber(a.decided_at) or 0)>(tonumber(b.decided_at) or 0)
     end)
     return items
+end
+
+function Plugin:_recover_pending_progress_coordinate(item,callback)
+    callback=type(callback)=="function" and callback or function() end
+    item=type(item)=="table" and item or {}
+    local book_id=tostring(item.book_id or "")
+    local sessions=self:_persisted_sessions()
+    local session=type(sessions[book_id])=="table" and sessions[book_id] or {}
+    local coordinate=type(session.pending_progress_coordinate)=="table" and U.copy(session.pending_progress_coordinate) or nil
+    if book_id=="" or not coordinate then callback(true,"no_coordinate"); return true end
+    local record_snapshot,record_error=self:_stored_progress_record(book_id)
+    if not record_snapshot then
+        self:_save_progress_state(book_id,"verification_required","需要打开本书恢复整书目录",nil,nil,coordinate.progress_sequence)
+        callback(false,record_error or "book_record_missing")
+        return false
+    end
+    self:_save_progress_state(book_id,"mapping_preparing","精确章节位置已保存，正在补全整书位置",nil,nil,coordinate.progress_sequence)
+    local started=self.sync:recover_partial_coordinate(record_snapshot,coordinate,function(position,err)
+        if not position then
+            self:_save_progress_state(book_id,"mapping_preparing","精确章节位置已保存，整书目录稍后继续恢复",nil,nil,coordinate.progress_sequence)
+            callback(false,err or "catalog_recovery_pending")
+            return
+        end
+        position.progress_sequence=tonumber(coordinate.progress_sequence or 0) or nil
+        position.progress_epoch=tonumber(coordinate.progress_epoch)
+        position.captured_at=tonumber(coordinate.captured_at or coordinate.coordinate_captured_at) or os.time()
+        self.store:save_session(book_id,{pending_progress_coordinate=false})
+        self:_save_pending_progress(book_id,position,"catalog_recovered","deferred")
+        if not self:logged_in() or self:_network_radio_hint()==false then
+            self:_save_progress_state(book_id,"waiting_network","整书位置已恢复，等待网络上传",tonumber(position.progress),nil,position.progress_sequence)
+            callback(true,"recovered_waiting_network",position)
+            return
+        end
+        self:_submit_progress_snapshot(book_id,position,{
+            detached=true,reason="coordinate_catalog_recovered",
+            pending_reason="upload_queued",pending_already_saved=true,
+            uploading_message="整书位置已恢复，正在上传阅读进度",
+            verifying_message="阅读进度已提交，等待微信确认",
+            unconfirmed_message="阅读进度已提交，仍等待微信确认",
+            failed_message="整书位置已保存，上传稍后继续",
+            record_override=record_snapshot,record_snapshot=record_snapshot,
+            verify_delays={3,10,24},
+        },function(ok,remote,submit_error)
+            callback(ok,submit_error,position,remote)
+        end)
+    end)
+    if not started then callback(false,"catalog_recovery_busy") end
+    return started~=false
+end
+
+function Plugin:_recover_all_pending_progress_coordinates(items,on_done)
+    items=type(items)=="table" and items or self:_progress_sync_issue_items()
+    local queue={}
+    for _,item in ipairs(items) do if item.can_recover_coordinate then queue[#queue+1]=item end end
+    if #queue==0 then if on_done then on_done(false,0) end; return false end
+    local index,recovered=1,0
+    local function next_one()
+        if index>#queue then if on_done then on_done(true,recovered) end; return end
+        local item=queue[index]; index=index+1
+        local advanced=false
+        local started=self:_recover_pending_progress_coordinate(item,function(ok)
+            if advanced then return end
+            advanced=true
+            if ok then recovered=recovered+1 end
+            UIManager:scheduleIn(.25,next_one)
+        end)
+        if not started and not advanced then advanced=true; UIManager:scheduleIn(.8,next_one) end
+    end
+    next_one()
+    return true
+end
+
+function Plugin:_submit_saved_pending_progress(item,callback)
+    callback=type(callback)=="function" and callback or function() end
+    item=type(item)=="table" and item or {}
+    local book_id=tostring(item.book_id or "")
+    local session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or {}
+    local current=type(session.pending_progress)=="table" and U.copy(session.pending_progress) or nil
+    if book_id=="" or not current then callback(true,"no_pending"); return true end
+    if tostring(session.progress_upload_state or "")~="pending_send" then
+        callback(true,"already_dispatched")
+        return true
+    end
+    local replayable,replay_reason=self:_progress_snapshot_replayable(current)
+    if not replayable then callback(false,replay_reason or "snapshot_not_replayable"); return false end
+    local record_snapshot,record_error=self:_stored_progress_record(book_id)
+    if not record_snapshot then callback(false,record_error or "book_record_missing"); return false end
+    if not self:logged_in() or self:_network_radio_hint()==false then callback(false,"network_unavailable"); return false end
+    local position=self:_prepare_progress_snapshot(book_id,current) or current
+    self:_save_progress_state(book_id,"uploading","此前未发送的精确位置正在继续上传",
+        tonumber(position.progress),nil,position.progress_sequence)
+    return self:_submit_progress_snapshot(book_id,position,{
+        detached=true,reason="pending_send_recovered",pending_reason="upload_queued",
+        pending_already_saved=true,record_override=record_snapshot,record_snapshot=record_snapshot,
+        uploading_message="此前未发送的精确位置正在继续上传",
+        verifying_message="阅读进度已提交，等待微信确认",
+        unconfirmed_message="阅读进度已提交，仍等待微信确认",
+        failed_message="精确位置已保存，稍后继续上传",
+        verify_delays={3,10,24},
+    },function(ok,remote,err)
+        callback(ok,err,remote)
+    end)
+end
+
+function Plugin:_submit_all_saved_pending_progress(items,on_done)
+    items=type(items)=="table" and items or self:_progress_sync_issue_items()
+    local queue={}
+    for _,item in ipairs(items) do if item.can_send then queue[#queue+1]=item end end
+    if #queue==0 then if on_done then on_done(false,0) end; return false end
+    local index,sent=1,0
+    local function next_one()
+        if index>#queue then if on_done then on_done(true,sent) end; return end
+        local item=queue[index]; index=index+1
+        local advanced=false
+        local started=self:_submit_saved_pending_progress(item,function(ok)
+            if advanced then return end
+            advanced=true
+            if ok then sent=sent+1 end
+            UIManager:scheduleIn(.25,next_one)
+        end)
+        if not started and not advanced then advanced=true; UIManager:scheduleIn(.8,next_one) end
+    end
+    next_one()
+    return true
 end
 
 function Plugin:_retry_saved_progress_verification(item,callback)
@@ -21823,7 +21971,7 @@ function Plugin:_resubmit_saved_progress(item,callback)
     local position=self:_prepare_progress_snapshot(book_id,current) or current
     self.store:save_session(book_id,{progress_resubmit_allowed=false,progress_last_verify_reason=false})
     return self:_submit_progress_snapshot(book_id,position,{
-        retry_count=0,detached=true,reason="manual_pending_resubmit",
+        detached=true,reason="manual_pending_resubmit",
         pending_reason="manual_resubmit_queued",pending_already_saved=true,
         uploading_message="正在重新提交同一精确位置",
         verifying_message="重新提交完成，正在确认云端位置",
@@ -21882,14 +22030,24 @@ function Plugin:_clear_verified_progress_ghosts()
     local sessions=self:_persisted_sessions()
     local cleared=0
     for id,session in pairs(sessions) do
-        if type(session)=="table" and type(session.pending_progress)=="table" then
-            local pending_seq=tonumber(session.pending_progress.progress_sequence or 0) or 0
-            local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
-            if pending_seq>0 and verified_seq>=pending_seq then
-                if self:_clear_pending_progress(tostring(id),pending_seq) then
-                    self:_save_progress_state(tostring(id),"local_uploaded","此前进度已经确认",
-                        tonumber(session.progress_local_percent or session.pending_progress.progress),
-                        tonumber(session.progress_remote_percent),verified_seq)
+        if type(session)=="table" then
+            if type(session.pending_progress)=="table" then
+                local pending_seq=tonumber(session.pending_progress.progress_sequence or 0) or 0
+                local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
+                if pending_seq>0 and verified_seq>=pending_seq then
+                    if self:_clear_pending_progress(tostring(id),pending_seq) then
+                        self:_save_progress_state(tostring(id),"local_uploaded","此前进度已经确认",
+                            tonumber(session.progress_local_percent or session.pending_progress.progress),
+                            tonumber(session.progress_remote_percent),verified_seq)
+                        cleared=cleared+1
+                    end
+                end
+            end
+            if type(session.pending_progress_coordinate)=="table" then
+                local coordinate_seq=tonumber(session.pending_progress_coordinate.progress_sequence or 0) or 0
+                local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
+                if coordinate_seq>0 and verified_seq>=coordinate_seq then
+                    self.store:save_session(tostring(id),{pending_progress_coordinate=false})
                     cleared=cleared+1
                 end
             end
@@ -21915,12 +22073,33 @@ function Plugin:_schedule_home_progress_recovery(delay)
         if now-(tonumber(self._home_progress_recovery_at) or 0)<20 then return end
         self:_clear_verified_progress_ghosts()
         local items=self:_progress_sync_issue_items()
-        local replayable=0
-        for _,item in ipairs(items) do if item.can_verify then replayable=replayable+1 end end
-        if replayable<=0 then return end
+        local coordinates,unsent,replayable=0,0,0
+        for _,item in ipairs(items) do
+            if item.can_recover_coordinate then coordinates=coordinates+1 end
+            if item.can_send then unsent=unsent+1 end
+            if item.can_verify and (tonumber(item.last_verify_at or 0)<=0
+                or now-tonumber(item.last_verify_at or 0)>=120) then replayable=replayable+1 end
+        end
+        if coordinates<=0 and unsent<=0 and replayable<=0 then return end
         self._home_progress_recovery_at=now
-        logger.info("[MiuRead][ProgressRetry] home recovery scheduled","books=",tostring(replayable))
-        self:_retry_all_saved_progress_verifications(items,true)
+        logger.info("[MiuRead][ProgressRetry] home recovery scheduled",
+            "coordinates=",tostring(coordinates),"unsent=",tostring(unsent),"verify=",tostring(replayable))
+        if coordinates>0 then
+            self:_recover_all_pending_progress_coordinates(items,function()
+                self:_schedule_home_progress_recovery(1.8)
+            end)
+        elseif unsent>0 then
+            self:_submit_all_saved_pending_progress(items,function()
+                self:_schedule_home_progress_recovery(1.8)
+            end)
+        elseif replayable>0 then
+            local due={}
+            for _,item in ipairs(items) do
+                if item.can_verify and (tonumber(item.last_verify_at or 0)<=0
+                    or now-tonumber(item.last_verify_at or 0)>=120) then due[#due+1]=item end
+            end
+            self:_retry_all_saved_progress_verifications(due,true)
+        end
     end
     self._home_progress_recovery_task=task
     UIManager:scheduleIn(math.max(1.2,tonumber(delay) or 2.4),task)
@@ -21948,6 +22127,17 @@ function Plugin:_show_progress_sync_issue_detail(item)
             and U.now_text(tonumber(pending.submitted_at or pending.captured_at or item.decided_at)) or "—",enabled=false},
         {text="原因",post_text=U.utf8_truncate(tostring(item.reason or "等待云端确认"),42,"…"),enabled=false},
     }
+    if item.can_send then
+        rows[#rows+1]={text="继续上传",post_text="这条位置确认尚未发送到微信读书",callback=function()
+            self:status_toast("阅读进度","正在上传此前保存的精确位置",3)
+            self:_submit_saved_pending_progress(item,function(ok,err)
+                if ok then self:status_toast("阅读进度","进度已提交，等待微信确认",3)
+                else self:status_toast("阅读进度仍待上传",U.first_line(tostring(err or item.reason),60),3) end
+                self._home_sync_summary_cache=nil; self._home_sync_summary_cache_at=nil
+                if HomeView.is_shown() and not self:_active_reader_ui() then self:_notify_home_data_changed("header") end
+            end)
+        end}
+    end
     if item.can_verify then
         rows[#rows+1]={text="重新确认",post_text="只读取云端位置，不重复上传",callback=function()
             self:status_toast("阅读进度","正在重新确认《"..U.utf8_truncate(item.title,18,"…").."》",3)
@@ -22484,10 +22674,12 @@ function Plugin:_prepare_progress_snapshot(book_id,position,persist_sequence)
     snapshot.progress_epoch=tonumber(snapshot.progress_epoch or position.progress_epoch) or current_epoch
     position.progress_epoch=snapshot.progress_epoch
     local pending=type(session.pending_progress)=="table" and session.pending_progress or {}
+    local coordinate=type(session.pending_progress_coordinate)=="table" and session.pending_progress_coordinate or {}
     local latest=math.max(
         tonumber(session.progress_latest_sequence or 0) or 0,
         tonumber(session.progress_verified_sequence or 0) or 0,
-        tonumber(pending.progress_sequence or 0) or 0
+        tonumber(pending.progress_sequence or 0) or 0,
+        tonumber(coordinate.progress_sequence or 0) or 0
     )
     local seq=tonumber(snapshot.progress_sequence or position.progress_sequence or 0) or 0
     if seq<=0 then seq=latest+1 end
@@ -22517,6 +22709,43 @@ function Plugin:_progress_snapshot_current(book_id,position)
     return seq>=latest
 end
 
+function Plugin:_save_pending_progress_coordinate(book_id,position,reason)
+    book_id=tostring(book_id or "")
+    if book_id=="" or type(position)~="table" then return false end
+    local co=tonumber(position.canonical_offset or position.chapter_offset or position.offset)
+    local uid=tostring(position.chapter_uid or "")
+    if uid=="" or co==nil or position.native_offset~=true
+        or tostring(position.offset_basis or position.position_basis or "")~="wr_data_co" then
+        return false
+    end
+    local snapshot=self:_prepare_progress_snapshot(book_id,position,false)
+    if not snapshot then return false end
+    snapshot.progress=nil
+    snapshot.display_progress=nil
+    snapshot.pending_reason=tostring(reason or "whole_progress_pending")
+    snapshot.coordinate_captured_at=os.time()
+    local session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or {}
+    local latest=tonumber(session.progress_latest_sequence or 0) or 0
+    local verified=tonumber(session.progress_verified_sequence or 0) or 0
+    local seq=tonumber(snapshot.progress_sequence or 0) or 0
+    if seq<latest or verified>=seq then return false end
+    self.store:save_session(book_id,{
+        pending_progress_coordinate=snapshot,
+        progress_latest_sequence=math.max(latest,seq),
+        progress_sync_state="mapping_preparing",
+        progress_sync_message="精确章节位置已保存，正在补全整书位置",
+        progress_upload_state="pending_send",
+        progress_upload_error=false,
+        progress_upload_pending_at=os.time(),
+        progress_worker_active=false,progress_worker_updated_at=os.time(),
+    })
+    logger.info("[MiuRead][ProgressCoordinate] state=pending",
+        "book=",book_id,"seq=",tostring(seq),"chapter=",uid,"co=",tostring(co),
+        "reason=",snapshot.pending_reason)
+    self:_invalidate_home_sync_status()
+    return true
+end
+
 function Plugin:_save_pending_progress(book_id,position,reason,sync_state)
     book_id=tostring(book_id or "")
     if book_id=="" or type(position)~="table" then return false end
@@ -22534,12 +22763,21 @@ function Plugin:_save_pending_progress(book_id,position,reason,sync_state)
         return false
     end
     snapshot.pending_reason=tostring(reason or "unconfirmed")
+    local pre_send={
+        upload_queued=true,manual_upload_queued=true,background_upload_queued=true,
+        manual_resubmit_queued=true,retry_upload_queued=true,progress_worker_busy=true,
+        final_position_captured=true,time_barrier_timeout=true,finalizer_deadline=true,
+        position_unavailable=true,catalog_prepare_failed=true,
+    }
+    local submitted_at=tonumber(snapshot.submitted_at or 0) or 0
+    local is_submitted=submitted_at>0 and pre_send[snapshot.pending_reason]~=true
     local pending_update={
-        pending_progress=snapshot,
+        pending_progress=snapshot,pending_progress_coordinate=false,
         progress_latest_sequence=math.max(latest,seq),
-        progress_upload_state="unconfirmed",
-        progress_upload_error=snapshot.pending_reason,
+        progress_upload_state=is_submitted and "submitted" or "pending_send",
+        progress_upload_error=is_submitted and false or snapshot.pending_reason,
         progress_upload_pending_at=os.time(),
+        progress_upload_submitted_at=is_submitted and submitted_at or false,
     }
     if sync_state~=nil then
         pending_update.progress_sync_state=tostring(sync_state)
@@ -22573,7 +22811,7 @@ function Plugin:_clear_pending_progress(book_id,position_or_sequence)
     end
     local verified_seq=tonumber(session.progress_verified_sequence or 0) or 0
     local update={
-        pending_progress=false,progress_upload_error=false,progress_upload_pending_at=false,
+        pending_progress=false,pending_progress_coordinate=false,progress_upload_error=false,progress_upload_pending_at=false,
         progress_worker_active=false,progress_worker_updated_at=os.time(),
         progress_resubmit_allowed=false,progress_last_verify_reason=false,
     }
@@ -22604,7 +22842,7 @@ function Plugin:_commit_progress_verified(book_id,submitted_position,remote,mess
     local localp=tonumber(submitted_position.progress)
     local remotep=tonumber(remote and remote.percent)
     self.store:save_session(book_id,{
-        pending_progress=false,
+        pending_progress=false,pending_progress_coordinate=false,
         progress_sync_state="local_uploaded",
         progress_sync_message=tostring(message or "阅读进度已从云端确认"),
         progress_local_percent=localp,
@@ -22741,8 +22979,6 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
         return false
     end
     local seq=tonumber(snapshot.progress_sequence or 0) or 0
-    local retries=math.max(0,math.min(1,tonumber(options.retry_count) or 1))
-    local submit_attempt=0
     local finished=false
     local accepted_notified=false
 
@@ -22790,18 +23026,6 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
                 finish(true,remote,nil,verify_meta)
                 return
             end
-            if submit_attempt<=retries then
-                self:_save_progress_state(book_id,"retrying",
-                    options.retrying_message or "云端持续未确认，正在进行唯一一次重新提交",
-                    tonumber(snapshot.progress),remote and remote.percent,seq)
-                logger.info("[MiuRead][ProgressRetry] replay exact snapshot",
-                    "book=",book_id,"seq=",tostring(seq),"attempt=",tostring(submit_attempt+1),
-                    "chapter=",tostring(snapshot.chapter_uid or "-"),
-                    "co=",tostring(snapshot.canonical_offset or snapshot.chapter_offset or snapshot.offset or "-"),
-                    "reason=",tostring(verify_error or "cloud_not_confirmed"))
-                UIManager:scheduleIn(tonumber(options.retry_delay) or .45,submit)
-                return
-            end
             self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
             self:_save_progress_state(book_id,"upload_unconfirmed",
                 options.unconfirmed_message or "请求已提交，但云端位置尚未确认",
@@ -22813,50 +23037,62 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
     submit=function()
         if finished then return end
         if not current() then finish(false,nil,"superseded",{superseded=true}); return end
-        submit_attempt=submit_attempt+1
-        snapshot.submitted_at=os.time()
-        if not (submit_attempt==1 and options.pending_already_saved==true) then
-            self:_save_pending_progress(book_id,snapshot,
-                submit_attempt==1 and (options.pending_reason or "upload_queued") or "retry_upload_queued")
+        snapshot.submit_attempt_at=os.time()
+        if options.pending_already_saved~=true then
+            self:_save_pending_progress(book_id,snapshot,options.pending_reason or "upload_queued")
         end
-        if not (submit_attempt==1 and options.quiet_intermediate_state==true) then
-            self:_save_progress_state(book_id,submit_attempt==1 and "uploading" or "retrying",
-                submit_attempt==1 and (options.uploading_message or "正在上传阅读进度")
-                    or (options.retrying_message or "正在重新提交同一阅读位置"),
+        if options.quiet_intermediate_state~=true then
+            self:_save_progress_state(book_id,"uploading",
+                options.uploading_message or "正在上传阅读进度",
                 tonumber(snapshot.progress),nil,seq)
         end
-        local started=self.sync:upload_progress(function(ok,result,_submitted)
+        local started=self.sync:upload_progress(function(ok,result,_submitted,submit_value)
             if finished then return end
             if not current() then finish(false,nil,"superseded",{superseded=true}); return end
             if ok~=true then
                 local session=(self:_persisted_sessions()[book_id]) or self.store:session(book_id) or {}
-                local kind=tostring(session.last_error_kind or self.sync.last_error_kind or "")
-                local state=(kind=="transport" or kind=="server" or kind=="unconfirmed" or kind=="authentication")
-                    and "upload_unconfirmed" or "upload_failed"
-                self:_save_pending_progress(book_id,snapshot,tostring(result or kind or "submit_failed"))
-                self:_save_progress_state(book_id,state,
-                    options.failed_message or "本次进度上传暂未完成",
+                local kind=tostring((type(submit_value)=="table" and submit_value.error_kind)
+                    or session.last_error_kind or self.sync.last_error_kind or "")
+                local dispatched=type(submit_value)=="table" and (
+                    submit_value.request_dispatched==true
+                    or (type(submit_value.meta)=="table" and submit_value.meta.request_dispatched==true))
+                if dispatched then
+                    -- The request may already have reached WeRead. Never replay it
+                    -- automatically. Mark it submitted-unknown and verify cloud
+                    -- readback first; this is the duplicate-write safety boundary.
+                    snapshot.submitted_at=os.time()
+                    self:_save_pending_progress(book_id,snapshot,"submission_result_unknown","submitted")
+                    self:_save_progress_state(book_id,"submitted",
+                        "阅读进度请求已发出，正在确认微信端位置",
+                        tonumber(snapshot.progress),nil,seq)
+                    verify_after_submit()
+                    return
+                end
+                -- Failure happened before the progress request was dispatched;
+                -- this snapshot is definitely unsent and Home recovery may retry it.
+                self:_save_pending_progress(book_id,snapshot,tostring(result or kind or "submit_failed"),"deferred")
+                self.store:save_session(book_id,{progress_upload_state="pending_send"})
+                self:_save_progress_state(book_id,"deferred",
+                    options.failed_message or "精确位置已保存，稍后继续上传",
                     tonumber(snapshot.progress),nil,seq)
-                finish(false,nil,tostring(result or kind or "submit_failed"),{error_kind=kind})
+                finish(false,nil,tostring(result or kind or "submit_failed"),{error_kind=kind,request_dispatched=false})
                 return
             end
-            if options.clear_pending_on_accept==true then
-                -- The server has accepted this exact immutable chapter/co. It
-                -- is no longer a "待同步" item. Readback may still restore
-                -- the snapshot later if it detects a real mismatch.
-                self.store:save_session(book_id,{
-                    pending_progress=false,
-                    progress_sync_state="submitted",
-                    progress_sync_message="结束阅读进度已提交，云端后台确认中",
-                    progress_upload_state="submitted",
-                    progress_upload_error=false,
-                    progress_upload_submitted_at=os.time(),
-                    progress_worker_active=false,
-                    progress_worker_updated_at=os.time(),
-                })
-                self._home_sync_summary_cache=nil
-                self._home_sync_summary_cache_at=nil
-            end
+            -- beta.13: transport acceptance and cloud readback are distinct.
+            -- Keep the immutable snapshot durable after a successful write so a
+            -- restart/Home recovery can VERIFY it without ever replaying it.
+            snapshot.submitted_at=os.time()
+            self:_save_pending_progress(book_id,snapshot,"awaiting_cloud_confirmation","verifying_upload")
+            self.store:save_session(book_id,{
+                progress_sync_state="submitted",
+                progress_sync_message="阅读进度已提交，等待微信确认",
+                progress_upload_state="submitted",
+                progress_upload_error=false,
+                progress_upload_submitted_at=snapshot.submitted_at,
+                progress_worker_active=false,progress_worker_updated_at=os.time(),
+            })
+            self._home_sync_summary_cache=nil
+            self._home_sync_summary_cache_at=nil
             if not accepted_notified and type(options.accepted_callback)=="function" then
                 accepted_notified=true
                 pcall(options.accepted_callback,snapshot,result)
@@ -22899,7 +23135,11 @@ function Plugin:_submit_progress_snapshot(book_id,position,options,callback)
                     tonumber(snapshot.progress),remote and remote.percent,seq)
                 finish(true,remote,nil,meta)
             else
-                submit()
+                self:_save_pending_progress(book_id,snapshot,verify_error or "cloud_not_confirmed")
+                self:_save_progress_state(book_id,"upload_unconfirmed",
+                    options.unconfirmed_message or "原提交位置仍等待微信确认",
+                    tonumber(snapshot.progress),remote and remote.percent,seq)
+                finish(false,remote,verify_error or "cloud_not_confirmed",meta)
             end
         end)
     else
@@ -22929,6 +23169,16 @@ function Plugin:upload_local_progress(manual,callback)
     local started,resolve_error=self.sync:resolve_local_progress(function(position,position_error,meta)
         if not position then
             local kind=tostring(meta and meta.error_kind or "position")
+            local coordinate=type(meta and meta.coordinate)=="table" and meta.coordinate or nil
+            if coordinate and self:_save_pending_progress_coordinate(id,coordinate,"whole_progress_pending") then
+                local message="精确章节位置已保存，正在等待完整目录换算整书进度"
+                self:_save_progress_state(id,"mapping_preparing",message,chapter_percent,nil,
+                    coordinate.progress_sequence)
+                self.sync:end_progress_sync("精确章节位置已保存，整书换算稍后继续")
+                if manual then self:info(message.."。\n\n网络恢复后会自动继续，不需要重新下载本书。") end
+                if callback then callback(false,position_error or "whole_progress_pending") end
+                return
+            end
             local message=kind=="authentication" and "登录状态无法用于获取章节信息"
                 or ((kind=="transport" or kind=="server") and "网络暂时无法获取章节信息"
                 or "当前文件暂时无法安全换算整书进度")
@@ -22943,15 +23193,14 @@ function Plugin:upload_local_progress(manual,callback)
         local target=math.floor((tonumber(snapshot.progress) or 0)+.5)
         if manual then self:status_toast("阅读进度同步","正在上传 "..target.."%……",3) end
         local upload_started=self:_submit_progress_snapshot(id,snapshot,{
-            reason="local_progress_uploaded",retry_count=1,
+            reason="local_progress_uploaded",
             pending_reason="manual_upload_queued",
             uploading_message="正在上传本机阅读进度",
             verifying_message="阅读进度已提交，正在等待云端状态稳定",
-            retrying_message="云端持续未确认，正在进行唯一一次重新提交",
             success_message="本机进度已上传并确认",
             unconfirmed_message="本机精确位置已保存，微信读书暂未返回可确认的位置",
             failed_message="本次上传暂未完成",
-            verify_delays={4,12,24},retry_delay=1.0,
+            verify_delays={4,12,24},
             accepted_callback=function(accepted_snapshot)
                 if manual then
                     local accepted_target=math.floor((tonumber(accepted_snapshot and accepted_snapshot.progress) or target)+.5)
@@ -22990,7 +23239,7 @@ function Plugin:upload_local_progress(manual,callback)
                 else
                     self:info("本机精确位置已保存，但微信读书暂未返回可确认的位置。\n\n"
                         .."本机位置："..string.format("%.1f",tonumber(submitted and submitted.progress) or final_target).."%\n"
-                        .."觅阅已经等待云端状态稳定，并最多重新提交一次；不会继续循环重传。")
+                        .."觅阅不会因为微信确认较慢而重复提交；稍后会继续读取云端位置确认。")
                 end
             end
             if callback then callback(false,err or "云端位置尚未确认") end
@@ -23004,6 +23253,9 @@ function Plugin:upload_local_progress(manual,callback)
         precise=true,
         prepare_catalog=true,
         require_cloud_coordinate=true,
+        on_coordinate=function(coordinate)
+            self:_save_pending_progress_coordinate(id,coordinate,"whole_progress_pending")
+        end,
         on_stage=function(stage)
             if stage=="mapping_preparing" then
                 self:_save_progress_state(id,"mapping_preparing","正在后台准备完整章节信息",chapter_percent,nil)
@@ -26809,6 +27061,24 @@ function Plugin:_reading_end_sync(reason,options,callback)
         local started,resolve_error=self.sync:resolve_local_progress(function(position,position_error,meta)
             local gate_already_released=finished
             if not position then
+                local coordinate=type(meta and meta.coordinate)=="table" and meta.coordinate or nil
+                if coordinate and self:_save_pending_progress_coordinate(book_id,coordinate,"reading_end_whole_progress_pending") then
+                    self._reading_end_background_verify_active=false
+                    task_states.progress="✓ 精确位置已保存 · 等待整书换算"
+                    local pct=ratio_snapshot and math.floor(U.clamp(ratio_snapshot,0,1)*100+.5) or nil
+                    self:_save_progress_state(book_id,"mapping_preparing",
+                        "最终精确章节位置已保存，等待补全整书目录",pct,nil,coordinate.progress_sequence)
+                    logger.info("[MiuRead][ReadingEnd] chapter coordinate retained",
+                        "reason=",reason,"book=",book_id,
+                        "chapter=",tostring(coordinate.chapter_uid or "-"),
+                        "co=",tostring(coordinate.canonical_offset or coordinate.chapter_offset or coordinate.offset or "-"),
+                        "after_gate=",tostring(gate_already_released),
+                        "mapping_error=",tostring(position_error or (meta and meta.error_kind) or "whole_progress_pending"))
+                    if not gate_already_released then finish(true) end
+                    finish_critical_after_time(true,"coordinate_saved")
+                    if HomeView.is_shown() and not self:_active_reader_ui() then self:_schedule_home_progress_recovery(1.2) end
+                    return
+                end
                 if not gate_already_released and resolve_attempt<2 then
                     UIManager:scheduleIn(.20,resolve_final_position)
                     return
@@ -26841,7 +27111,7 @@ function Plugin:_reading_end_sync(reason,options,callback)
                 self._reading_end_background_verify_active=true
                 local function start_background_progress()
                     local upload_started=self:_submit_progress_snapshot(book_id,snapshot,{
-                    reason="reading_end_background_verified",retry_count=0,reading_end=true,
+                    reason="reading_end_background_verified",reading_end=true,
                     detached=true,verify_detached=true,
                     record_snapshot=U.copy(record_snapshot),record_override=U.copy(record_snapshot),
                     record_generation_override=record_generation_snapshot,
@@ -26849,12 +27119,11 @@ function Plugin:_reading_end_sync(reason,options,callback)
                     quiet_intermediate_state=true,nonblocking_verify=true,clear_pending_on_accept=false,
                     uploading_message="正在后台上传结束阅读进度",
                     verifying_message="请求已提交，稍后确认云端位置",
-                    retrying_message="云端尚未同步到最新位置，稍后再次读取确认",
                     success_message="结束阅读进度已上传并确认",
                     unconfirmed_message="最终精确位置已保留，云端仍待确认",
                     failed_message="后台上传暂未完成",
                     busy_message="最终位置已保存；同步任务繁忙，稍后继续处理",
-                    verify_delays={6,15,25},retry_delay=1.0,
+                    verify_delays={6,15,25},
                     accepted_callback=function()
                         mark_critical_done(true,"progress_submitted")
                     end,
@@ -26926,6 +27195,9 @@ function Plugin:_reading_end_sync(reason,options,callback)
             precise=true,prepare_catalog=resolve_attempt>1,require_cloud_coordinate=true,
             detached=true,source_first=options.release_early==true,
             defer_seconds=options.release_early==true and (tonumber(options.source_defer_seconds) or .45) or nil,
+            on_coordinate=function(coordinate)
+                self:_save_pending_progress_coordinate(book_id,coordinate,"whole_progress_pending")
+            end,
             record_snapshot=U.copy(record_snapshot),
             record_generation_override=record_generation_snapshot,
             ratio_snapshot=ratio_snapshot,
