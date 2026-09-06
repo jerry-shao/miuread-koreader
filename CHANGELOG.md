@@ -1,3 +1,7 @@
+## 5.7.0 - 2026-09-07
+
+- 本次合并包含近期 beta 分支累计修复与扩展中心、锁屏壁纸相关改进。
+
 ## 5.8.0-beta.18
 
 - 新增“设备美化”推荐分类，首批收录 Appearance、墨痕壁纸、DashWallpaper、CoverProgress 与 Highlights Screensaver；DashWallpaper 同时加入觅阅首页精选。Appearance 只提供安装/更新入口，不复制其主题设置；CoverProgress 与 Highlights Screensaver 暂不接入觅阅统一锁屏来源。
