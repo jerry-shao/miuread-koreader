@@ -25,8 +25,8 @@ local defaults={
              annotations={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
              read_report={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
          }}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={}},home_ui={enabled=false,layout_version=24,layout_style="desk",show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="recent"},device={source="all",kind="all",locality="all",sort="recent"}},action_items={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false},action_order={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot"},action_layout_version=3,panel_items={wifi=true,bluetooth=true,rotate=true,screenshot=true,full_refresh=true,koreader_settings=true,return_koreader=true,quit=true,sync=true,miuread_settings=false,downloads=false,restart=false,sleep=false},panel_order={"wifi","bluetooth","rotate","screenshot","full_refresh","koreader_settings","return_koreader","quit","sync","miuread_settings","downloads","restart","sleep"},panel_layout_version=3,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
- library={},sessions={},shelf_cache={books={},mp={},updated_at=0,stream={enabled=false,ids={},hydrated_ids={},total=0,source="",updated_at=0}},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={},archive_keys={}},home_ui={enabled=false,layout_version=24,layout_style="desk",show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="recent"},device={source="all",kind="all",locality="all",sort="recent"}},weread_group="all",action_items={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false},action_order={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"},action_layout_version=4,panel_items={wifi=true,bluetooth=false,rotate=true,screenshot=true,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false},panel_order={"wifi","bluetooth","rotate","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"},panel_layout_version=5,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
+ library={},sessions={},shelf_cache={raw_books={},raw_mp={},books={},mp={},groups={updated_at=0,authoritative=false,list={},book_groups={}},effective_scope={mode="all",fingerprint="all",updated_at=0},updated_at=0,stream={enabled=false,ids={},hydrated_ids={},total=0,source="",updated_at=0}},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},recent_reads={version=1,items={}},
  prefetch_cache={},
 }
@@ -75,6 +75,128 @@ local function invalidate_same_account_contexts_table(sessions)
     end
     return sessions,changed
 end
+-- beta.12 / #91: sessions are control-plane state, not a second copy of the
+-- book database. Older builds persisted complete chapter catalogs inside both
+-- `sessions[*].chapters` and report contexts. On long books this could grow
+-- miuread.lua past 100k lines and make Lua's parser reject the serialized chunk
+-- with "too many syntax levels". Keep only the fields the compatibility report
+-- worker can actually consume; chapter catalogs live in `library[*].catalog`.
+local REPORT_CONTEXT_KEYS={
+    book_id=true,bookId=true,title=true,author=true,summary=true,
+    reader_url=true,url=true,psvts=true,pclts=true,token=true,
+    progress=true,chapter_uid=true,chapterUid=true,chapter_idx=true,chapterIdx=true,
+    chapter_offset=true,offset=true,chapter_word_count=true,
+    local_native_chapter_offset=true,local_chapter_offset_basis=true,
+    local_chapter_uid=true,local_chapter_idx=true,local_chapter_offset=true,
+    local_chapter_word_count=true,local_chapter_title=true,
+    source_is_standalone=true,source_chapter_uid=true,source_chapter_index=true,
+    source_chapter_word_count=true,source_chapter_title=true,
+    catalog_complete=true,remote_progress_loaded=true,remote_progress=true,
+    remote_chapter_uid=true,remote_chapter_idx=true,remote_chapter_offset=true,
+    app_id=true,read_context_updated_at=true,read_context_ready=true,
+    context_updated_at=true,core_map_hash=true,book_version=true,version=true,
+}
+
+local function table_nonempty_array(value)
+    return type(value)=="table" and #value>0
+end
+
+local function compact_report_context(context,keep_chapters)
+    if type(context)~="table" then return context,0 end
+    local out,removed={},0
+    for key,value in pairs(context) do
+        if REPORT_CONTEXT_KEYS[key] then
+            out[key]=U.copy(value)
+        elseif key=="chapters" and keep_chapters==true and table_nonempty_array(value) then
+            out.chapters=U.copy(value)
+        else
+            removed=removed+1
+        end
+    end
+    return out,removed
+end
+
+local function library_catalog_available(library,id)
+    local row=type(library)=="table" and library[tostring(id or "")] or nil
+    return type(row)=="table" and table_nonempty_array(row.catalog)
+end
+
+local function promote_complete_context_catalog(library,id,row)
+    id=tostring(id or "")
+    if id=="" or type(library)~="table" or type(row)~="table" then return false end
+    local book=type(library[id])=="table" and library[id] or nil
+    if not book or table_nonempty_array(book.catalog) then return false end
+    for _,field in ipairs({"legacy_report_context","report_context"}) do
+        local context=type(row[field])=="table" and row[field] or nil
+        if context and context.catalog_complete==true and table_nonempty_array(context.chapters) then
+            book.catalog=U.copy(context.chapters)
+            book.catalog_complete=true
+            book.catalog_chapter_count=math.max(tonumber(book.catalog_chapter_count or 0) or 0,#book.catalog)
+            library[id]=book
+            return true
+        end
+    end
+    return false
+end
+
+local function compact_session_row(row,keep_chapters)
+    if type(row)~="table" then return row,0 end
+    local removed=0
+    if keep_chapters~=true and row.chapters~=nil then row.chapters=nil; removed=removed+1 end
+    for _,field in ipairs({"legacy_report_context","report_context"}) do
+        if type(row[field])=="table" then
+            local compact,count=compact_report_context(row[field],keep_chapters)
+            row[field]=compact
+            removed=removed+count
+        end
+    end
+    return row,removed
+end
+
+local function compact_sessions_for_library(sessions,library,promote_catalogs)
+    sessions=type(sessions)=="table" and sessions or {}
+    library=type(library)=="table" and library or {}
+    local changed,promoted=0,0
+    if promote_catalogs==true then
+        for id,row in pairs(sessions) do
+            if promote_complete_context_catalog(library,id,row) then promoted=promoted+1 end
+        end
+    end
+    for id,row in pairs(sessions) do
+        if type(row)=="table" then
+            local keep=not library_catalog_available(library,id)
+            local _,count=compact_session_row(row,keep)
+            changed=changed+count
+        end
+    end
+    return sessions,library,changed,promoted
+end
+
+
+local function emergency_compact_sessions(sessions)
+    sessions=type(sessions)=="table" and sessions or {}
+    local changed=0
+    for _,row in pairs(sessions) do
+        if type(row)=="table" then
+            if row.chapters~=nil then row.chapters=nil; changed=changed+1 end
+            for _,field in ipairs({"legacy_report_context","report_context"}) do
+                if type(row[field])=="table" then
+                    local compact,count=compact_report_context(row[field],false)
+                    row[field]=compact
+                    changed=changed+count
+                end
+            end
+            -- These fields are diagnostics/readback caches only. If an old
+            -- build ever stored an unexpectedly deep server object here, keep
+            -- the exact pending/local progress but regenerate diagnostics later.
+            for _,field in ipairs({"remote_sources","last_payload_public"}) do
+                if row[field]~=nil then row[field]=nil; changed=changed+1 end
+            end
+        end
+    end
+    return sessions,changed
+end
+
 local function invalidate_upload_health_table(auth)
     auth=U.merge(defaults.auth,auth or {})
     auth.health.notice_pending=false
@@ -257,6 +379,9 @@ function Store:migrate()
         self.db:saveSetting("schema",schema)
     end
     if schema<Config.SCHEMA then
+        -- beta.6: migrate entirely in memory and let Store:new() perform the
+        -- single validated atomic flush. This removes one fsync per schema step.
+        self._migration_batch=true
         local previous=self.db:readSetting("preferences",{}) or {}
         if schema<114 then
             logger.info("[MiuRead][Migration] schema 113 -> 114 begin","from=",tostring(schema))
@@ -701,12 +826,142 @@ function Store:migrate()
             logger.info("[MiuRead][Migration] schema 125 -> 126 done",
                 "home_library=unified","files_moved=false","existing_data_preserved=true")
         end
+        if schema<127 then
+            -- 5.8.0-beta.4 separates the complete WeRead snapshot from the
+            -- user-authorized shelf, removes hidden type/locality filters and
+            -- restores the complete quick-control candidate pools.
+            local current=self:preferences()
+            current.shelf_filter=type(current.shelf_filter)=="table" and current.shelf_filter or {enabled=false,archives={}}
+            current.shelf_filter.archives=type(current.shelf_filter.archives)=="table" and current.shelf_filter.archives or {}
+            current.shelf_filter.archive_keys=type(current.shelf_filter.archive_keys)=="table" and current.shelf_filter.archive_keys or {}
+            current.home_ui=type(current.home_ui)=="table" and current.home_ui or {}
+            local home=current.home_ui
+            home.library_filters=type(home.library_filters)=="table" and home.library_filters or {}
+            for _,section in ipairs({"shelf","device"}) do
+                home.library_filters[section]=type(home.library_filters[section])=="table" and home.library_filters[section] or {}
+                local state=home.library_filters[section]
+                state.source=tostring(state.source or "all")
+                state.sort=tostring(state.sort or "recent")
+                state.kind="all"
+                state.locality="all"
+            end
+            home.weread_group="all"
+            home.action_items=type(home.action_items)=="table" and home.action_items or {}
+            if home.action_items.extensions==nil then home.action_items.extensions=false end
+            home.action_order=type(home.action_order)=="table" and home.action_order or {}
+            local action_seen=false
+            for _,key in ipairs(home.action_order) do if key=="extensions" then action_seen=true; break end end
+            if not action_seen then home.action_order[#home.action_order+1]="extensions" end
+            home.action_layout_version=4
+            home.panel_items=type(home.panel_items)=="table" and home.panel_items or {}
+            local panel_defaults={bluetooth=false,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,
+                koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false}
+            for key,value in pairs(panel_defaults) do if home.panel_items[key]==nil then home.panel_items[key]=value end end
+            local desired={"wifi","bluetooth","rotate","screenshot","full_refresh","downloads","sync","miuread_settings",
+                "koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"}
+            local seen,order={},{}
+            for _,key in ipairs(type(home.panel_order)=="table" and home.panel_order or {}) do
+                if not seen[key] then seen[key]=true; order[#order+1]=key end
+            end
+            for _,key in ipairs(desired) do if not seen[key] then seen[key]=true; order[#order+1]=key end end
+            home.panel_order=order
+            home.panel_layout_version=5
+            self:save_preferences(current)
+            local cache=self.db:readSetting("shelf_cache",{}) or {}
+            cache.stream={enabled=false,ids={},hydrated_ids={},total=0,source="disabled_beta4",updated_at=0}
+            -- A beta.3 streamed cache may contain placeholder rows. Mark it
+            -- stale so Home schedules a complete snapshot refresh, while the
+            -- defensive cache reader keeps selected-group users fail-closed.
+            cache.updated_at=0
+            self.db:saveSetting("shelf_cache",cache)
+            logger.info("[MiuRead][Migration] schema 126 -> 127 done",
+                "weread_scope=preserved","hidden_filters=cleared","panel_max=12","stream_navigation=false")
+        end
+        if schema<128 then
+            -- 5.8.0-beta.5 introduces the generic extension installer v2 and
+            -- makes persisted download state fail-open for user cleanup. Only
+            -- obviously incomplete active records are normalized here; a valid
+            -- child-process descriptor is still recovered by Plugin:init().
+            local state=DownloadDatabase.get_download_state(self)
+            if type(state)=="table" and (state.status=="active" or state.status=="prefetch")
+                and type(state.task)~="table" then
+                if state.status=="prefetch" or (type(state.options)=="table" and state.options.prefetch==true) then
+                    DownloadDatabase.clear_download_state(self)
+                else
+                    state.status="interrupted"
+                    state.error_kind="interrupted"
+                    state.error="上次下载状态不完整，已恢复为可继续状态；下载断点仍保留。"
+                    state.task=nil
+                    state.updated_at=os.time()
+                    DownloadDatabase.set_download_state(self,state)
+                end
+            end
+            logger.info("[MiuRead][Migration] schema 127 -> 128 done",
+                "extension_installer=v2","download_state=repairable")
+        end
+        if schema<129 then
+            -- Package Manager v3 deliberately does not adopt v2 transfer
+            -- residues from miuread/temp. V3 tasks live in extensions/tasks
+            -- with an owner/session descriptor, so only those are resumable.
+            -- Preserve the user's selected source/custom prefix, but reset old
+            -- success/failure-only route scores because v3 also records actual
+            -- transfer speed, TTFB and Range support.
+            local network=self.db:readSetting("extension_center_network_v2",{}) or {}
+            if type(network)~="table" then network={} end
+            network.mode=tostring(network.mode or "auto")
+            network.custom_prefix=tostring(network.custom_prefix or "")
+            network.health={}
+            self.db:saveSetting("extension_center_network_v2",network)
+            self.db:saveSetting("extension_package_manager_version",3)
+            self.db:saveSetting("extension_transfer_legacy_v2","ignored_not_resumed")
+            logger.info("[MiuRead][Migration] schema 128 -> 129 done",
+                "extension_package_manager=v3","legacy_v2_partials=ignored","route_health=reset")
+        end
+        if schema<130 then
+            -- beta.11 replaces Package Manager v3's route scoring/cross-source
+            -- partial model with the deterministic built-in extension engine v4.
+            -- Existing installed plugins are untouched; only transient v3 task
+            -- data is discarded because its partial identity rules are different.
+            local network=self.db:readSetting("extension_center_network_v2",{}) or {}
+            if type(network)~="table" then network={} end
+            self.db:saveSetting("extension_center_network_v2",{
+                mode=tostring(network.mode or "auto"),
+                custom_prefix=tostring(network.custom_prefix or ""),
+            })
+            local old_tasks=tostring(self.data_dir or "").."/extensions/tasks"
+            if old_tasks~="/extensions/tasks" then U.remove_tree(old_tasks) end
+            U.mkdir(tostring(self.data_dir or "").."/extensions")
+            U.mkdir(old_tasks)
+            self.db:saveSetting("extension_package_manager_version",4)
+            self.db:saveSetting("extension_transfer_legacy_v3","discarded_schema130")
+            logger.info("[MiuRead][Migration] schema 129 -> 130 done",
+                "extension_engine=v4","route_health=removed","cross_source_partials=removed","legacy_v3_tasks=discarded")
+        end
+        if schema<131 then
+            -- beta.12 repairs the historical session-context duplication seen in
+            -- #91. Promote a complete context catalog into the durable book row
+            -- when needed, then remove duplicate chapter arrays from sessions.
+            -- No downloaded EPUB, progress snapshot, account or user preference
+            -- is discarded. Future save_session() calls apply the same guard.
+            local sessions=self.db:readSetting("sessions",{}) or {}
+            local library=self.db:readSetting("library",{}) or {}
+            local compacted,new_library,removed,promoted=compact_sessions_for_library(
+                sessions,library,true)
+            self.db:saveSetting("sessions",compacted)
+            self.db:saveSetting("library",new_library)
+            self.db:saveSetting("session_storage_version",2)
+            logger.info("[MiuRead][Migration] schema 130 -> 131 done",
+                "session_context=v2","fields_removed=",tostring(removed),
+                "catalogs_promoted=",tostring(promoted))
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
+        self._migration_batch=false
     end
 end
 function Store:get(k,d) local v=self.db:readSetting(k,nil); return v==nil and U.copy(d) or v end
 function Store:set(k,v)
     self.db:saveSetting(k,v)
+    if self._migration_batch==true then return true end
     return self:flush()
 end
 function Store:set_deferred(k,v) self.db:saveSetting(k,v) end
@@ -799,7 +1054,9 @@ end
 function Store:clear_auth() return self:set("auth",U.copy(defaults.auth)) end
 function Store:clear_account_shelf_cache()
     local cache=self:shelf_cache()
-    cache.books={}; cache.mp={}; cache.updated_at=0
+    cache.raw_books={}; cache.raw_mp={}; cache.books={}; cache.mp={}; cache.updated_at=0
+    cache.groups={updated_at=0,authoritative=false,list={},book_groups={}}
+    cache.effective_scope={mode="all",fingerprint="all",updated_at=0}
     cache.stream={enabled=false,ids={},hydrated_ids={},total=0,source="",updated_at=0}
     self:save_shelf_cache(cache)
 end
@@ -951,7 +1208,7 @@ function Store:forget_book_local_state(id)
 
     local shelf=self:shelf_cache()
     local shelf_changed=false
-    for _,group in ipairs({shelf.books or {},shelf.mp or {}}) do
+    for _,group in ipairs({shelf.raw_books or {},shelf.raw_mp or {},shelf.books or {},shelf.mp or {}}) do
         for _,row in ipairs(group) do
             if tostring(row.bookId or row.book_id or "")==key and row.cover_path~=nil then
                 row.cover_path=nil; shelf_changed=true
@@ -1534,6 +1791,14 @@ function Store:session(id) return self:get("sessions",{})[tostring(id)] end
 function Store:save_session(id,patch,flush_now)
     local a=self:get("sessions",{}); local k=tostring(id)
     a[k]=U.merge(a[k] or {},patch or {})
+    local library=self:get("library",{}) or {}
+    local keep_chapters=not library_catalog_available(library,k)
+    local _,removed=compact_session_row(a[k],keep_chapters)
+    if removed>0 then
+        logger.info("[MiuRead][StoreRepair] compacted session write",
+            "book=",k,"fields_removed=",tostring(removed),
+            "catalog_in_library=",tostring(not keep_chapters))
+    end
     self.db:saveSetting("sessions",a)
     if flush_now~=false then
         local saved,err=self:flush()
@@ -1571,7 +1836,7 @@ function Store:update_cached_progress(id,percent)
     if id=="" or percent==nil then return false end
     local cache=self:shelf_cache()
     local changed=false
-    for _,group in ipairs({cache.books or {},cache.mp or {}}) do
+    for _,group in ipairs({cache.raw_books or {},cache.raw_mp or {},cache.books or {},cache.mp or {}}) do
         for _,row in ipairs(group) do
             if tostring(row.bookId or row.book_id or "")==id then
                 row.progress=U.clamp(percent,0,100)
@@ -1759,6 +2024,19 @@ function Store:flush()
             self.db.data.sessions=merge_newer_progress_sessions(self.db.data.sessions,disk_data.sessions)
         end
     end
+    -- Apply the v2 session compacting invariant on every flush as a final
+    -- safety net. This also repairs a stale Home Store instance before it can
+    -- re-introduce a full chapter catalog after a Reader-side migration.
+    do
+        local compacted,library,removed=compact_sessions_for_library(
+            self.db.data.sessions,self.db.data.library,false)
+        self.db.data.sessions=compacted
+        self.db.data.library=library
+        if removed>0 then
+            logger.info("[MiuRead][StoreRepair] pre-flush session compaction",
+                "fields_removed=",tostring(removed))
+        end
+    end
     local previous_path=self.settings_path..".previous"
     if not self.isolated then
         local valid=settings_file_valid(self.settings_path)
@@ -1770,13 +2048,21 @@ function Store:flush()
     -- Validate the complete chunk in memory, atomically replace the target, and
     -- keep the last valid generation if anything fails.
     local payload
-    local ok,err=xpcall(function()
+    local function attempt_write()
         payload=settings_payload(self.db.data,self.settings_path)
         local valid_payload,parse_error=settings_payload_valid(payload)
         if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
         local written,write_error=U.atomic_write(self.settings_path,payload,true)
         if not written then error("atomic settings write failed: "..tostring(write_error)) end
-    end,debug.traceback)
+    end
+    local ok,err=xpcall(attempt_write,debug.traceback)
+    if not ok and tostring(err):find("too many syntax levels",1,true) then
+        local compacted,removed=emergency_compact_sessions(self.db.data.sessions)
+        self.db.data.sessions=compacted
+        logger.warn("[MiuRead][StoreRepair] parser-depth emergency compaction",
+            "fields_removed=",tostring(removed))
+        ok,err=xpcall(attempt_write,debug.traceback)
+    end
     if not ok then
         logger.err("[MiuRead][Store] settings flush failed; keeping previous settings",tostring(err))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end

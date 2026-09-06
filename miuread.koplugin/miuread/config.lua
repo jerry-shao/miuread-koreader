@@ -1,18 +1,18 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.6.0",
-    SCHEMA = 126,
+    VERSION = "5.8.0-beta.12",
+    SCHEMA = 131,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
     DATA_DIR = "miuread",
 
     -- 当前安装包自身仍有 stable/beta 身份；用户选择的 OTA 通道独立保存。
     -- beta.20 起所有实时更新清单都由统一仓库 miuread-koreader 提供。
-    UPDATE_CHANNEL = "stable",
-    UPDATE_CHANNEL_LABEL = "正式通道",
-    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+    UPDATE_CHANNEL = "beta",
+    UPDATE_CHANNEL_LABEL = "内测通道",
+    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     UPDATE_MANIFESTS = {
-        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     },
     UPDATE_CHANNELS = {
         stable = {
@@ -65,6 +65,16 @@ local C = {
     -- A manual refresh bypasses the runtime backoff once.
     COVER_RETRY_DELAYS = {30, 120, 600, 1800},
 
+    -- beta.6: keep only the three primary Home views resident. Section switches
+    -- paint immediately with the normal UI waveform, then one coalesced full
+    -- cleanup refresh restores e-ink quality after interaction settles.
+    HOME_SECTION_CACHE_LAYERS = 3,
+    HOME_SECTION_CLEAN_REFRESH_DELAY = 2.8,
+
+    -- Automatic maintenance blocked by memory/foreground pressure is parked
+    -- without a polling timer and is woken by the next Home-idle event.
+    BACKGROUND_PARK_LOG_INTERVAL = 20,
+
     READ_INTERVAL = 60,
     -- First confirmed reading-time report is intentionally earlier than the
     -- steady 60 s cadence so the user can verify sync without waiting a minute.
@@ -100,7 +110,7 @@ local C = {
     -- A screen-off reader finalizer is a short best-effort task, never a
     -- second long-lived power state. When this deadline expires the local
     -- checkpoint remains authoritative and Kindle may return to native sleep.
-    READER_FINALIZER_DEADLINE_SECONDS = 20,
+    READER_FINALIZER_DEADLINE_SECONDS = 12,
 
     -- 5.4.5-beta.1 resolves downloaded-book positions from persisted source
     -- caches before any chapter network fetch. Local mapping gets a short
@@ -248,6 +258,11 @@ local C = {
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
     HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- Ref #91: do not fork a fresh book-download worker when the device is
+    -- already at the low-memory boundary observed on KPW6. Resume remains a
+    -- little more permissive because a checkpointed worker has already paid
+    -- most of its setup cost.
+    HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
 
     -- beta.4 coalesces repeated typography taps into one KOReader reflow. On a
     -- low-memory/heavy-download overlap, let the downloader checkpoint first

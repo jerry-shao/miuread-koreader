@@ -27,8 +27,12 @@ local DownloadProgress = InputContainer:extend{
     covers_fullscreen = true,
     stop_events_propagation = true,
     on_cancel = nil,
+    on_pause = nil,
     on_background = nil,
     on_close = nil,
+    cancel_text = "取消下载",
+    pause_text = "暂停下载",
+    background_text = "后台下载",
 }
 
 local function widget_is_shown(widget)
@@ -114,17 +118,41 @@ function DownloadProgress:init()
         zero_sep = true,
         buttons = {{
             {
-                text = "取消下载",
+                text = tostring(self.cancel_text or "取消下载"),
                 callback = function()
                     if self.cancelled then return end
+                    local accepted=true
+                    if self.on_cancel then
+                        local ok,result=pcall(self.on_cancel)
+                        if not ok then
+                            logger.warn("[MiuRead][DownloadUI] cancel callback failed",tostring(result))
+                        elseif result==false then
+                            accepted=false
+                        end
+                    end
+                    if not accepted then return end
                     self.cancelled = true
                     self.status_widget:setText("正在取消……")
                     self:_redraw()
-                    if self.on_cancel then self.on_cancel() end
                 end,
             },
             {
-                text = "后台下载",
+                text = tostring(self.pause_text or "暂停下载"),
+                callback = function()
+                    if self.cancelled then return end
+                    if self.on_pause then
+                        local ok,result=pcall(self.on_pause)
+                        if not ok then
+                            logger.warn("[MiuRead][DownloadUI] pause callback failed",tostring(result))
+                        elseif result==false then
+                            return
+                        end
+                    end
+                    self:close("paused")
+                end,
+            },
+            {
+                text = tostring(self.background_text or "后台下载"),
                 callback = function()
                     if self.cancelled then return end
                     if self.on_background then self.on_background() end
@@ -175,8 +203,57 @@ function DownloadProgress:_redraw()
     return true
 end
 
+local function format_bytes(value)
+    local n=math.max(0,tonumber(value) or 0)
+    if n>=1024*1024*1024 then return string.format("%.1f GB",n/(1024*1024*1024)) end
+    if n>=1024*1024 then return string.format("%.1f MB",n/(1024*1024)) end
+    if n>=1024 then return string.format("%.0f KB",n/1024) end
+    return tostring(math.floor(n+0.5)).." B"
+end
+
+local function format_eta(value)
+    local seconds=math.max(0,math.floor(tonumber(value) or 0))
+    if seconds<=0 then return "" end
+    if seconds<60 then return tostring(seconds).." 秒" end
+    local minutes=math.floor(seconds/60)
+    local rest=seconds%60
+    if minutes<60 then return tostring(minutes).." 分"..(rest>0 and (" "..tostring(rest).." 秒") or "") end
+    return tostring(math.floor(minutes/60)).." 小时 "..tostring(minutes%60).." 分"
+end
+
 function DownloadProgress:set_state(state)
     state = state or {}
+    if state.kind=="extension" then
+        local bytes=tonumber(state.downloaded_bytes) or 0
+        local total=tonumber(state.total_bytes) or 0
+        local percent=tonumber(state.percent)
+        if not percent then percent=total>0 and bytes/total or 0 elseif percent>1 then percent=percent/100 end
+        percent=clamp(percent,0,1)
+        local labels={
+            queued="准备下载",prepare="准备下载",download="正在下载",downloading="正在下载",
+            waiting_network="等待 Wi-Fi",paused_user="下载已暂停",paused_power="设备休眠，下载已暂停",
+            interrupted="下载已中断",downloaded="下载完成",verifying="正在校验",
+            extracting="正在解压",installing="正在安装",done="安装完成",error="任务未完成",cancelled="下载已停止",
+        }
+        local rows={labels[state.stage] or labels[state.state] or tostring(state.stage or state.state or "处理中")}
+        if total>0 then rows[#rows+1]=format_bytes(bytes).." / "..format_bytes(total) else rows[#rows+1]=format_bytes(bytes) end
+        local speed=tonumber(state.speed_bps) or 0
+        if speed>0 and (state.stage=="download" or state.state=="downloading") then rows[#rows+1]="速度 "..format_bytes(speed).."/s" end
+        local eta=format_eta(state.eta_seconds)
+        if eta~="" and (state.stage=="download" or state.state=="downloading") then rows[#rows+1]="预计剩余 "..eta end
+        if state.source and tostring(state.source)~="" then rows[#rows+1]="下载源："..clean_status(state.source,80) end
+        if state.message and tostring(state.message)~="" then rows[#rows+1]=clean_status(state.message,150) end
+        local percent_text=tostring(math.floor(percent*100+0.5)).."%"
+        local status_text=table.concat(rows,"\n")
+        local signature=percent_text.."\n"..status_text
+        if signature==self._last_signature then return end
+        self._last_signature=signature
+        self.progress:setPercentage(percent)
+        self.percent_widget:setText(percent_text)
+        self.status_widget:setText(status_text)
+        self:_redraw()
+        return
+    end
     local current = tonumber(state.current) or 0
     local total = tonumber(state.total) or 0
     local percent = tonumber(state.percent)

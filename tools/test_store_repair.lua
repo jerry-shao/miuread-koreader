@@ -1,0 +1,116 @@
+local TOOL_DIR=tostring(arg and arg[0] or ''):match('^(.*)/[^/]+$') or '.'
+local SRC_ROOT=TOOL_DIR..'/..'
+local ROOT=SRC_ROOT..'/miuread.koplugin/'
+local TMP=(os.getenv('TMPDIR') or '/tmp')..'/miuread-beta12-store-repair'
+package.path=ROOT..'?.lua;'..package.path
+os.execute('rm -rf '..string.format('%q',TMP)); os.execute('mkdir -p '..string.format('%q',TMP))
+
+local function copy(v,seen)
+    if type(v)~='table' then return v end
+    seen=seen or {}; if seen[v] then return seen[v] end
+    local out={}; seen[v]=out
+    for k,x in pairs(v) do out[copy(k,seen)]=copy(x,seen) end
+    return out
+end
+local function merge(a,b)
+    local out=copy(a or {})
+    for k,v in pairs(b or {}) do
+        if type(v)=='table' and type(out[k])=='table' then out[k]=merge(out[k],v) else out[k]=copy(v) end
+    end
+    return out
+end
+local function quote(s) return string.format('%q',s) end
+local function dump_table(v,seen)
+    local t=type(v)
+    if t=='nil' then return 'nil' elseif t=='boolean' or t=='number' then return tostring(v)
+    elseif t=='string' then return quote(v) elseif t~='table' then return 'nil' end
+    seen=seen or {}; if seen[v] then error('cycle') end; seen[v]=true
+    local parts={'{'}
+    for k,x in pairs(v) do parts[#parts+1]='['..dump_table(k,seen)..']='..dump_table(x,seen)..',' end
+    parts[#parts+1]='}'; seen[v]=nil; return table.concat(parts)
+end
+
+package.preload['datastorage']=function()
+    return {getFullDataDir=function() return TMP end,getSettingsDir=function() return TMP end,getDataDir=function() return TMP end}
+end
+package.preload['libs/libkoreader-lfs']=function()
+    return {attributes=function(path,what)
+        local f=io.open(path,'rb'); if f then local n=f:seek('end'); f:close(); if what=='mode' then return 'file' end; return {mode='file',size=n,modification=os.time()} end
+        local ok=os.execute('[ -d '..string.format('%q',path)..' ]')
+        if ok==true or ok==0 then if what=='mode' then return 'directory' end; return {mode='directory',size=0,modification=os.time()} end
+    end}
+end
+local SEED={}
+package.preload['luasettings']=function()
+    local L={}
+    function L:open(path)
+        local o={data=copy(SEED)}
+        function o:readSetting(k,d) local v=self.data[k]; if v==nil then return d end; return v end
+        function o:saveSetting(k,v) self.data[k]=v end
+        function o:delSetting(k) self.data[k]=nil end
+        return o
+    end
+    return L
+end
+package.preload['dump']=function() return function(v) return dump_table(v) end end
+package.preload['miuread.config']=function()
+    return {SCHEMA=131,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.12',
+        UPDATE_MANIFEST='',AUTO_UPDATE_INTERVAL=1,READ_INTERVAL=60,IDLE_TIMEOUT=60,REMOTE_THRESHOLD=3}
+end
+package.preload['miuread.json']=function() return {encode=function() return '{}' end,decode=function() return {} end} end
+package.preload['miuread.download_database']=function()
+    return {runtime_path=function(d) return d..'/download-runtime.json' end,get_download_state=function() return nil end,
+        clear_download_state=function() return true end,set_download_state=function() return true end,get_download_queue=function() return {} end,set_download_queue=function() return true end}
+end
+package.preload['miuread.cookies']=function() return {} end
+package.preload['logger']=function() return {info=function() end,warn=function() end,err=function() end} end
+package.preload['miuread.util']=function()
+    return {
+        copy=copy,merge=merge,trim=function(v) return tostring(v or ''):match('^%s*(.-)%s*$') end,
+        mkdir=function(p) os.execute('mkdir -p '..string.format('%q',p)); return true end,
+        remove_tree=function(p) os.execute('rm -rf '..string.format('%q',p)); return true end,
+        atomic_write=function(path,data) local f=assert(io.open(path,'wb')); f:write(data); f:close(); return true end,
+        copy_file=function(a,b) local f=io.open(a,'rb'); if not f then return false end; local d=f:read('*a'); f:close(); local o=assert(io.open(b,'wb')); o:write(d); o:close(); return true end,
+        file_exists=function(path) local f=io.open(path,'rb'); if f then f:close(); return true end; return false end,
+        file_size=function(path) local f=io.open(path,'rb'); if not f then return nil end; local n=f:seek('end'); f:close(); return n end,
+        id_name=function(v) return tostring(v or ''):gsub('[^%w%-_%.]','_') end,
+        safe_name=function(v) return tostring(v or '') end,shell_quote=function(v) return quote(tostring(v or '')) end,
+        clamp=function(v,a,b) v=tonumber(v) or a; if v<a then return a elseif v>b then return b end; return v end,
+    }
+end
+
+-- Simulate the #91 pattern: the same 320-chapter catalog is duplicated in the
+-- durable library and in multiple session/report contexts, alongside a deeply
+-- nested diagnostic object that should never be persisted as report context.
+local chapters={}
+for i=1,320 do chapters[i]={uid='u'..i,index=i,title='chapter '..i,word_count=2000+i} end
+local deep={leaf=true}; for i=1,260 do deep={next=deep} end
+SEED={
+    schema=130,
+    library={book1={book_id='book1',catalog=copy(chapters),catalog_complete=true,variants={}}},
+    sessions={book1={
+        chapters=copy(chapters),psvts='p',token='t',pending_progress={chapter_uid='u8',canonical_offset=33,progress=5,safe=true},
+        legacy_report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),psvts='p',token='t',junk=deep},
+        report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),reader_url='https://example',junk=deep},
+    }},
+}
+
+local Store=require('miuread.store')
+local st=Store:new{isolated=true,data_dir=TMP..'/data',settings_path=TMP..'/settings.lua'}
+local row=assert(st:session('book1'))
+assert(row.chapters==nil,'top-level duplicate chapter catalog survived migration')
+assert(type(row.legacy_report_context)=='table' and row.legacy_report_context.chapters==nil,'legacy context chapters survived migration')
+assert(row.legacy_report_context.junk==nil,'deep legacy diagnostic survived compaction')
+assert(type(row.report_context)=='table' and row.report_context.junk==nil,'deep report diagnostic survived compaction')
+assert(row.psvts=='p' and row.token=='t','required scalar session context was lost')
+assert(type(row.pending_progress)=='table' and row.pending_progress.chapter_uid=='u8','pending exact progress was lost')
+assert(#st:get('library',{}).book1.catalog==320,'canonical library catalog was damaged')
+
+-- Future writes cannot grow the duplicate catalog back.
+st:save_session('book1',{chapters=copy(chapters),legacy_report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),psvts='new',junk=deep}})
+row=assert(st:session('book1'))
+assert(row.chapters==nil and row.legacy_report_context.chapters==nil,'save_session reintroduced duplicate chapter catalogs')
+assert(row.legacy_report_context.psvts=='new','sanitizer removed a required context field')
+local loader,err=loadfile(TMP..'/settings.lua'); assert(loader,err)
+local ok,data=pcall(loader); assert(ok and type(data)=='table','compacted settings file is not valid Lua')
+print('store session compaction + schema131 repair: PASS')
