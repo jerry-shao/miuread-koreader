@@ -15,6 +15,7 @@ M.CATEGORIES = {
     { key = "chinese_input", label = "中文输入", detail = "拼音输入与候选增强" },
     { key = "transfer_files", label = "传书与文件", detail = "无线传书与文件管理" },
     { key = "data_sync", label = "资料与同步", detail = "文献、稍后读与批注同步" },
+    { key = "device_beauty", label = "设备美化", detail = "主题、界面与休眠壁纸" },
     { key = "plugin_market", label = "插件市场", detail = "其他 KOReader 插件下载市场" },
     { key = "experimental", label = "实验性扩展", detail = "仍处于 Beta 或需要额外谨慎的扩展", aggregate_experimental = true },
 }
@@ -30,6 +31,8 @@ M.CAPABILITY_LABELS = {
     library = "书库",
     plugin_market = "插件市场",
     ui_extension = "界面增强",
+    appearance = "界面美化",
+    screensaver = "休眠壁纸",
     ui_replacement = "完整界面替代",
 }
 
@@ -159,13 +162,16 @@ M.ENTRIES = {
     },
     {
         id = "inkstain",
-        repo = "miumiupy98-art/inkstain.koplugin",
+        repo = "Estela-Zelin84/inkstain.koplugin",
+        repo_aliases = { "miumiupy98-art/inkstain.koplugin" },
+        install_dirname = "inkstain.koplugin",
         name = "墨痕壁纸",
         author = "Estela-Zelin84",
         aliases = { "墨痕", "墨痕壁纸", "inkstain", "ink stain", "账单壁纸", "休眠壁纸" },
         description = "根据 KOReader 阅读统计或觅阅书架数据生成墨痕账单风格休眠壁纸，支持阅读时长、Top 书单与每日趋势。",
-        category = "reading_tools",
-        capabilities = { "reading_tool", "ui_extension" },
+        category = "device_beauty",
+        capabilities = { "screensaver", "ui_extension" },
+        lockscreen_provider = "inkstain",
         recommended = true,
         featured = true,
         featured_order = 7,
@@ -175,17 +181,83 @@ M.ENTRIES = {
         network_required = false,
         package = {
             type = "release_asset",
-            version = "v3.5.7",
+            -- Verified fallback only. beta.17 resolves the newest installable official
+            -- Release at runtime; this record is never treated as the remote latest.
+            version = "v3.9.0",
             artifact = {
-                name = "inkstain.koplugin-v3.5.7.zip",
-                url = "https://github.com/miumiupy98-art/inkstain.koplugin/releases/download/v3.5.7/inkstain.koplugin-v3.5.7.zip",
-                size = 9983676,
-                sha256 = "87da12b78dd941f424c617fc10fdb620ca239b60fc9b61b39089f4c4717e0bee",
+                name = "inkstain.koplugin-v3.9.0.zip",
+                url = "https://github.com/Estela-Zelin84/inkstain.koplugin/releases/download/v3.9.0/inkstain.koplugin-v3.9.0.zip",
+                size = 10294040,
+                sha256 = "e43b33022a91d56590e78c52f8f845f0c869b6ab5a65a464f80942fe7787f080",
             },
             install = { dirname = "inkstain.koplugin", layout = "name-koplugin" },
         },
         install_strategy = "standard",
         warning = "当前作者仅在 Kindle Paperwhite 4 上完成真机测试；其他设备首次启用前建议备份 KOReader 屏保与设置。",
+    },
+    {
+        id = "dashwallpaper",
+        repo = "RC-APC/DashWallpaper.koplugin",
+        install_dirname = "DashWallpaper.koplugin",
+        name = "DashWallpaper 看板壁纸",
+        author = "RC-APC",
+        aliases = { "dashwallpaper", "dash wallpaper", "看板壁纸", "动态壁纸", "天气壁纸", "榜单壁纸" },
+        description = "把天气、榜单、资讯等看板自动下载为 KOReader 休眠壁纸，支持每日自动更新、城市天气和自定义壁纸源。",
+        category = "device_beauty",
+        capabilities = { "screensaver", "ui_extension" },
+        lockscreen_provider = "dashwallpaper",
+        recommended = true,
+        featured = true,
+        featured_order = 8,
+        recommendation = "天气、榜单与资讯看板壁纸",
+        platforms = { "kindle", "kobo", "android", "desktop", "other" },
+        network_required = true,
+        install_strategy = "standard",
+        warning = "新插件：首次使用前建议确认 KOReader 的休眠屏幕设置。觅阅切换为 DashWallpaper 时会先生成壁纸，成功后才改变当前锁屏来源。",
+    },
+    {
+        id = "appearance",
+        repo = "Euphoriyy/appearance.koplugin",
+        install_dirname = "appearance.koplugin",
+        name = "Appearance",
+        author = "Euphoriyy",
+        aliases = { "appearance", "主题", "配色", "外观", "界面美化" },
+        description = "自定义 KOReader 界面与书籍配色、主题、字体、背景图片、进度条和标注样式。",
+        category = "device_beauty",
+        capabilities = { "appearance", "ui_extension" },
+        recommended = true,
+        recommendation = "主题、配色与界面外观",
+        install_strategy = "standard",
+    },
+    {
+        id = "coverprogress",
+        repo = "joemk88/koreader-coverprogress",
+        install_dirname = "coverprogress.koplugin",
+        name = "CoverProgress",
+        author = "joemk88",
+        aliases = { "coverprogress", "cover progress", "封面进度", "进度壁纸" },
+        description = "把当前阅读书籍封面与阅读进度写成固定屏保图片。",
+        category = "device_beauty",
+        capabilities = { "screensaver" },
+        recommended = true,
+        recommendation = "书籍封面 + 阅读进度屏保",
+        install_strategy = "standard",
+        warning = "beta.18 先作为推荐扩展提供安装与更新，不接入觅阅统一锁屏来源；真机验证稳定后再考虑直接接管。",
+    },
+    {
+        id = "highlightsscreensaver",
+        repo = "k-nacion/highlightsscreensaver.koplugin",
+        install_dirname = "highlightsscreensaver.koplugin",
+        name = "Highlights Screensaver",
+        author = "k-nacion",
+        aliases = { "highlightsscreensaver", "highlights screensaver", "摘录屏保", "划线屏保", "随机摘录" },
+        description = "休眠时随机显示 KOReader 中的划线与摘录，让屏保展示正在积累的阅读内容。",
+        category = "device_beauty",
+        capabilities = { "screensaver", "reading_tool" },
+        recommended = true,
+        recommendation = "随机显示书中摘录作为屏保",
+        install_strategy = "standard",
+        warning = "beta.18 先作为推荐扩展提供安装与更新，不直接加入觅阅统一锁屏来源。",
     },
     {
         id = "anki",
@@ -542,6 +614,9 @@ local by_repo, by_id, category_map = {}, {}, {}
 for _, category in ipairs(M.CATEGORIES) do category_map[category.key] = category end
 for _, entry in ipairs(M.ENTRIES) do
     if entry.repo then by_repo[entry.repo] = entry end
+    for _, alias in ipairs(type(entry.repo_aliases)=="table" and entry.repo_aliases or {}) do
+        if tostring(alias or "")~="" then by_repo[tostring(alias)] = entry end
+    end
     if entry.id then by_id[entry.id] = entry end
 end
 
@@ -551,6 +626,20 @@ end
 
 function M.known_repo(repo)
     return by_repo[tostring(repo or "")]
+end
+
+function M.canonical_repo(repo)
+    local entry=M.known_repo(repo)
+    return entry and tostring(entry.repo or repo or "") or tostring(repo or "")
+end
+
+function M.install_dirname(entry)
+    entry=type(entry)=="table" and entry or {}
+    local package=type(entry.package)=="table" and entry.package or {}
+    local install=type(package.install)=="table" and package.install or {}
+    local dirname=tostring(entry.install_dirname or install.dirname or "")
+    if dirname=="" then dirname=tostring(entry.repo or ""):match("([^/]+)$") or "" end
+    return dirname
 end
 
 function M.by_id(id)
@@ -639,7 +728,7 @@ function M.package_source(entry, arch)
     local size=tonumber(artifact.size or 0) or 0
     local sha256=tostring(artifact.sha256 or ""):lower():gsub("[^0-9a-f]","")
     local install=type(package.install)=="table" and package.install or {}
-    local dirname=tostring(install.dirname or package.install_dirname or "")
+    local dirname=tostring(install.dirname or package.install_dirname or M.install_dirname(entry) or "")
     if not url:match("^https://") then return nil,"目录安装包地址无效" end
     if size<=0 then return nil,"目录安装包缺少精确文件大小" end
     if #sha256~=64 then return nil,"目录安装包缺少有效 SHA-256" end
@@ -688,14 +777,54 @@ local function release_asset_score(entry,asset,arch)
             if entry.architecture_sensitive==true and not matched then return nil end
         end
     end
+    -- Unknown community repositories do not have per-plugin architecture
+    -- metadata. Prefer a package whose filename explicitly matches this CPU and
+    -- reject explicit packages for another CPU. Final ELF validation still runs
+    -- after extraction, so filenames are only a selection hint, not trust.
+    local current=tostring(arch or "")
+    if current~="" and current~="unknown" then
+        local explicit={
+            arm64={"arm64","aarch64"}, armv7={"armv7","armhf"}, arm_legacy={"arm-legacy","arm_legacy","armv6","armv5"},
+            x86_64={"x86_64","amd64"}, x86={"i386","i686","x86"}, mips={"mips"},
+        }
+        local seen_arch,matched=false,false
+        for key,tokens in pairs(explicit) do
+            for _,token in ipairs(tokens) do
+                if lower:find(token,1,true) then
+                    seen_arch=true
+                    if key==current then matched=true end
+                end
+            end
+        end
+        if seen_arch and not matched then return nil end
+        if matched then score=score+70 end
+    end
     return score
+end
+
+local function inferred_asset_dirname(asset_name)
+    asset_name=tostring(asset_name or "")
+    local seen,dirs={},{}
+    for name in asset_name:gmatch("([%w%._%-]-%.koplugin)") do
+        name=name:gsub("^[%._%-]+","")
+        if name~="" and name~="miuread.koplugin" and not seen[name] then
+            seen[name]=true
+            dirs[#dirs+1]=name
+        end
+    end
+    if #dirs==1 then return dirs[1] end
+    return ""
 end
 
 local function release_source_from_asset(entry,release,asset)
     local repo=tostring(entry.repo or "")
-    local dirname=tostring(entry.install_dirname or repo:match("([^/]+)$") or "")
+    local dirname=M.install_dirname(entry)
+    local asset_name=tostring(asset and asset.name or "")
+    if not dirname:match("^[%w%._%-]+%.koplugin$") then
+        dirname=inferred_asset_dirname(asset_name)
+    end
     if not dirname:match("^[%w%._%-]+%.koplugin$") or dirname=="miuread.koplugin" then
-        return nil,"无法从仓库名确定插件安装目录"
+        return nil,"无法从仓库或安装包名确定唯一插件目录"
     end
     local sha=release_asset_sha(asset and asset.digest)
     local version=tostring(release.tag_name or release.name or "")
@@ -733,9 +862,10 @@ function M.release_package_candidates(entry, release, arch)
     return out
 end
 
--- beta.15: the official latest Release decides the package identity. Mirrors
--- only transport those exact bytes. If two top candidates tie, return the
--- candidate list so the caller can ask the user instead of guessing.
+-- beta.17: an official stable Release decides the package identity. GitHub's
+-- `/releases/latest` is not trusted because it may point at a channel/manifest
+-- release. Mirrors only transport those exact official bytes. If two top
+-- candidates tie, return the candidate list so the caller can ask instead of guessing.
 function M.release_package_source(entry, release, arch)
     local candidates=M.release_package_candidates(entry,release,arch)
     if #candidates==0 then return nil,"最新 Release 没有可识别的插件 ZIP",candidates end
@@ -745,6 +875,28 @@ function M.release_package_source(entry, release, arch)
     local source=candidates[1]
     source._asset_score=nil
     return source,nil,candidates
+end
+
+function M.release_is_stable(release)
+    release=type(release)=="table" and release or {}
+    return release.draft~=true and release.prerelease~=true
+end
+
+-- GitHub /releases/latest can point at a channel/manifest Release rather than a
+-- plugin ZIP. Walk recent stable releases in GitHub order and stop at the newest
+-- release that actually exposes an installable asset. An ambiguous newest
+-- release is surfaced for user choice instead of silently falling back older.
+function M.best_release_source(entry,releases,arch)
+    for _,release in ipairs(type(releases)=="table" and releases or {}) do
+        if M.release_is_stable(release) then
+            local source,err,candidates=M.release_package_source(entry,release,arch)
+            if source then return release,source,nil,candidates end
+            if type(candidates)=="table" and #candidates>0 then
+                return release,nil,err,candidates
+            end
+        end
+    end
+    return nil,nil,"近期正式 Release 没有可识别的插件 ZIP",{}
 end
 
 -- Source archives are allowed only after the GitHub Contents API has proved the
@@ -759,7 +911,7 @@ function M.source_package_source(entry, repo_info, source_probe)
         return nil,"GitHub 源码结构尚未确认可直接安装"
     end
     local repo=tostring(entry.repo or "")
-    local dirname=tostring(entry.install_dirname or repo:match("([^/]+)$") or "")
+    local dirname=tostring(source_probe.expected_dir or M.install_dirname(entry) or "")
     if not repo:match("^[%w%._%-]+/[%w%._%-]+$") then return nil,"源码仓库地址无效" end
     if not dirname:match("^[%w%._%-]+%.koplugin$") or dirname=="miuread.koplugin" then
         return nil,"源码安装目录无效"

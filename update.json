@@ -1,17 +1,17 @@
 {
-  "version": "5.8.0-beta.16",
-  "name": "\u89c5\u9605 \u00b7 \u5fae\u4fe1\u8bfb\u4e66\u52a9\u624b 5.8.0-beta.16 \u5185\u6d4b\u7248",
+  "version": "5.8.0-beta.18",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.18 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.16/miuread-v5.8.0-beta.16-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.16/miuread-v5.8.0-beta.16-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.16/miuread-v5.8.0-beta.16-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.16/miuread-v5.8.0-beta.16-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.16/miuread-v5.8.0-beta.16-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip"
   ],
-  "size": 1938660,
-  "sha256": "88382f3405220c2c264e527b51a798caa987be00f4a52ac1314f60026de138df",
-  "summary": "\u4fee\u590d #102 \u4e3b\u9875\u4e0e\u9605\u8bfb\u9875\u540c\u65f6\u5b58\u6d3b\u65f6\u53ef\u80fd\u4e92\u76f8\u7528\u65e7\u8bbe\u7f6e\u8986\u76d6\u65b0\u8bbe\u7f6e\u7684\u95ee\u9898\uff1aReaderUI \u4e0e FileManager \u5728\u540c\u4e00\u8fdb\u7a0b\u3001\u540c\u4e00\u8bbe\u7f6e\u6587\u4ef6\u548c\u6570\u636e\u76ee\u5f55\u4e0b\u590d\u7528\u540c\u4e00\u4efd\u5b9e\u65f6 Store\uff0c\u672c\u5730\u4e66\u5e93\u8def\u5f84\u4e0d\u4f1a\u518d\u88ab\u53e6\u4e00\u754c\u9762\u7684\u65e7\u5feb\u7167\u6e05\u7a7a\u3002\n\u672c\u5730\u4e66\u5e93\u9009\u62e9\u3001\u76ee\u5f55\u626b\u63cf\u7ed3\u679c\u3001\u5ef6\u8fdf\u4fdd\u5b58\u4e0e reload \u73b0\u5728\u5bf9\u4e3b\u9875\u548c\u9605\u8bfb\u9875\u5373\u65f6\u4e00\u81f4\uff1b\u65e0\u9700\u91cd\u542f\u624d\u80fd\u770b\u5230\u53e6\u4e00\u754c\u9762\u521a\u786e\u8ba4\u7684\u4e66\u5e93\u8def\u5f84\u6216\u626b\u63cf\u7ed3\u679c\u3002",
-  "notes": "\u4fee\u590d #102 \u4e3b\u9875\u4e0e\u9605\u8bfb\u9875\u540c\u65f6\u5b58\u6d3b\u65f6\u53ef\u80fd\u4e92\u76f8\u7528\u65e7\u8bbe\u7f6e\u8986\u76d6\u65b0\u8bbe\u7f6e\u7684\u95ee\u9898\uff1aReaderUI \u4e0e FileManager \u5728\u540c\u4e00\u8fdb\u7a0b\u3001\u540c\u4e00\u8bbe\u7f6e\u6587\u4ef6\u548c\u6570\u636e\u76ee\u5f55\u4e0b\u590d\u7528\u540c\u4e00\u4efd\u5b9e\u65f6 Store\uff0c\u672c\u5730\u4e66\u5e93\u8def\u5f84\u4e0d\u4f1a\u518d\u88ab\u53e6\u4e00\u754c\u9762\u7684\u65e7\u5feb\u7167\u6e05\u7a7a\u3002\n\u672c\u5730\u4e66\u5e93\u9009\u62e9\u3001\u76ee\u5f55\u626b\u63cf\u7ed3\u679c\u3001\u5ef6\u8fdf\u4fdd\u5b58\u4e0e reload \u73b0\u5728\u5bf9\u4e3b\u9875\u548c\u9605\u8bfb\u9875\u5373\u65f6\u4e00\u81f4\uff1b\u65e0\u9700\u91cd\u542f\u624d\u80fd\u770b\u5230\u53e6\u4e00\u754c\u9762\u521a\u786e\u8ba4\u7684\u4e66\u5e93\u8def\u5f84\u6216\u626b\u63cf\u7ed3\u679c\u3002"
+  "size": 1947886,
+  "sha256": "f00b7e67ca3266e8d6a563d1465e30a0d17172fe3ce0cfe88d3bd2a89b0958a2",
+  "summary": "新增设备美化分类与 DashWallpaper 首页推荐，统一书籍封面、墨痕和 DashWallpaper 的锁屏切换；第三方壁纸安装、首次生成、失败回退和重启续接由觅阅统一处理。",
+  "notes": "设备美化首批加入 Appearance、墨痕、DashWallpaper、CoverProgress 与 Highlights Screensaver。锁屏壁纸现在可直接选择书籍封面、墨痕或 DashWallpaper；Dash 未安装时可安装并使用，首次必须先生成并验证有效壁纸，成功后才改变 KOReader 锁屏，失败保持原设置。切回书籍封面会恢复上次画框/完整/铺满样式。Android/不支持休眠的设备不强行接管锁屏。公众号继续只在下拉快捷工具栏。"
 }

@@ -143,9 +143,9 @@ local HOME_ACTION_MAX_VISIBLE=6
 -- eight supported/selected controls in one compact row. The display limit is
 -- intentionally separate from the candidate-pool size so new controls do not
 -- force another layout rewrite.
-local HOME_PANEL_ITEM_ORDER={"wifi","bluetooth","rotate","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"}
-local HOME_PANEL_ITEM_DEFAULT={wifi=true,bluetooth=false,rotate=true,screenshot=true,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false}
-local HOME_PANEL_LAYOUT_VERSION=6
+local HOME_PANEL_ITEM_ORDER={"wifi","bluetooth","rotate","mp","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"}
+local HOME_PANEL_ITEM_DEFAULT={wifi=true,bluetooth=false,rotate=true,mp=true,screenshot=false,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false}
+local HOME_PANEL_LAYOUT_VERSION=7
 local HOME_PANEL_MAX_VISIBLE=8
 -- ReaderUI and FileManager create separate plugin instances. Keep navigation
 -- state in _G so opening/closing a document does not lose its MiuRead origin.
@@ -492,18 +492,16 @@ local function install_home_screensaver_patch()
         local use_home_target=enabled and (HomeView.is_shown() or HOME_READER_ORIGIN)
         local sources=use_home_target and collect_sources(opts) or {}
         local style=tostring((opts and opts.lockscreen_style) or HOME_SESSION.lockscreen_style or "frame")
-        if style~="frame" and style~="fit" and style~="fill" and style~="receipt" then style="frame" end
-        -- beta.6: receipt is not just a MiuRead preference anymore. InkStain's
-        -- real enabled state wins, so enabling/disabling it from either plugin
-        -- cannot leave MiuRead and the actual KOReader screensaver out of sync.
+        if style~="frame" and style~="fit" and style~="fill" and style~="receipt" and style~="dash" then style="frame" end
+        -- beta.18: the persisted provider is the single source of truth for
+        -- native cover / InkStain / DashWallpaper. Provider reconciliation also
+        -- adopts an externally enabled InkStain or an existing Dash wallpaper,
+        -- so the presentation hook never lets two sources fight over suspend.
         local owner=home_owner()
-        if owner and type(owner._inkstain_enabled)=="function" then
-            local ok_ink,ink_enabled=pcall(owner._inkstain_enabled,owner)
-            if ok_ink and ink_enabled==true then
-                style="receipt"
-            elseif style=="receipt" and type(owner._home_native_lockscreen_style)=="function" then
-                local ok_native,native_style=pcall(owner._home_native_lockscreen_style,owner)
-                if ok_native then style=tostring(native_style or "frame") end
+        if owner and type(owner._home_effective_lockscreen_style)=="function" then
+            local ok_style,effective=pcall(owner._home_effective_lockscreen_style,owner)
+            if ok_style and (effective=="frame" or effective=="fit" or effective=="fill" or effective=="receipt" or effective=="dash") then
+                style=effective
             end
         end
 
@@ -537,10 +535,10 @@ local function install_home_screensaver_patch()
             -- freeze background producers here; Plugin:onSuspend owns the
             -- lifecycle transition exactly once after KOReader commits suspend.
             if args.n==0 and use_home_target then
-                if style=="receipt" then
-                    -- 墨痕壁纸：交给 InkStain 插件自行管理屏保设置，
+                if style=="receipt" or style=="dash" then
+                    -- 外部壁纸：由 InkStain / DashWallpaper 维护屏保图片与设置，
                     -- miuread 不干预，让原版 Screensaver.setup 正常执行。
-                    logger.info("[MiuRead][Lockscreen] receipt mode delegated to InkStain")
+                    logger.info("[MiuRead][Lockscreen] external provider delegated", "provider=",style)
                 else
                     manager.ui=host or current
                     manager.show_message=false
@@ -577,11 +575,11 @@ local function install_home_screensaver_patch()
         local native_ok,native_result=call_original(manager,args,nil)
         if not native_ok then error(native_result) end
         if args.n==0 and use_home_target then
-            if style=="receipt" then
-                -- 墨痕壁纸：不设置无效的 screensaver_type，
+            if style=="receipt" or style=="dash" then
+                -- 外部壁纸：不覆盖插件已经准备好的 document_cover 设置，
                 -- InkStain 插件的 onSuspend 会自行设置 document_cover + PNG 路径，
                 -- 原版 Screensaver.setup 已根据这些设置正常执行。
-                logger.info("[MiuRead][Lockscreen] receipt mode delegated to InkStain","book=",tostring(source_file or ""))
+                logger.info("[MiuRead][Lockscreen] external provider delegated","provider=",style,"book=",tostring(source_file or ""))
             else
                 if not apply_direct_cover(manager,sources,style,source_file) then
                     logger.info("[MiuRead][Lockscreen] takeover=false fallback=koreader",
@@ -1103,7 +1101,13 @@ function Plugin:init()
     end)
     logger.info("[MiuRead][Startup] core ready")
 
+    -- beta.18: reconcile the persisted lockscreen provider after PluginLoader
+    -- has had a chance to instantiate user plugins. Missing providers fall back
+    -- to the user's last native cover; a pending “安装并使用” resumes without
+    -- making the user reopen the settings page.
+    UIManager:scheduleIn(.35,function() self:_reconcile_lockscreen_provider(true) end)
     if not self._reader_context then
+        UIManager:scheduleIn(1.6,function() self:_resume_pending_lockscreen_provider() end)
         UIManager:scheduleIn(.8,function() if not self:_current_document_path() then self:_install_pending_downloads(false) end end)
         UIManager:scheduleIn(1.4,function() self:_show_auth_notice() end)
         UIManager:scheduleIn(5.0,function() self:maybe_auto_check_update(false) end)
@@ -3258,6 +3262,28 @@ function Plugin:_home_preferences()
     if home.action_items.mp~=nil then home.action_items.mp=nil; changed=true end
     normalize_quick_group("action_items","action_order","action_layout_version",HOME_ACTION_LAYOUT_VERSION,HOME_ACTION_ITEM_ORDER,HOME_ACTION_ITEM_DEFAULT)
     if home.action_items.frontlight~=nil then home.action_items.frontlight=nil; changed=true end
+    -- beta.17 keeps 公众号 out of the middle Home shortcut strip and places it
+    -- in the pull-down Tools/control center instead. Replace Screenshot only for
+    -- users who still have the untouched beta.16 recommended panel; customized
+    -- layouts merely gain 公众号 as an optional candidate.
+    if (tonumber(home.panel_layout_version) or 0)<7 then
+        local old_default=type(home.panel_items)=="table"
+            and home.panel_items.wifi==true and home.panel_items.bluetooth~=true
+            and home.panel_items.rotate==true and home.panel_items.screenshot==true
+            and home.panel_items.full_refresh==true and home.panel_items.downloads~=true
+            and home.panel_items.sync~=true and home.panel_items.miuread_settings~=true
+            and home.panel_items.koreader_settings==true and home.panel_items.koreader_file_manager~=true
+            and home.panel_items.return_koreader==true and home.panel_items.quit~=true
+            and home.panel_items.restart==true and home.panel_items.sleep==true
+            and home.panel_items.reboot~=true and home.panel_items.poweroff~=true
+        if old_default then
+            home.panel_items.mp=true
+            home.panel_items.screenshot=false
+        elseif type(home.panel_items)=="table" and home.panel_items.mp==nil then
+            home.panel_items.mp=false
+        end
+        changed=true
+    end
     normalize_quick_group("panel_items","panel_order","panel_layout_version",HOME_PANEL_LAYOUT_VERSION,HOME_PANEL_ITEM_ORDER,HOME_PANEL_ITEM_DEFAULT)
     -- Unsupported control-center items are filtered at render/settings time,
     -- not destructively cleared here. This preserves a user's selection when
@@ -3277,13 +3303,25 @@ function Plugin:_home_preferences()
     if legacy_section_map[home.active_section] then home.active_section=legacy_section_map[home.active_section]; changed=true end
     if home.active_section~="shelf" and home.active_section~="device" and home.active_section~="recent" then home.active_section="shelf"; changed=true end
     if home.lockscreen_recent==nil then home.lockscreen_recent=true; changed=true end
-    if home.lockscreen_style~="frame" and home.lockscreen_style~="fit" and home.lockscreen_style~="fill" and home.lockscreen_style~="receipt" then
+    local lock_provider=tostring(home.lockscreen_provider or "")
+    if lock_provider~="native" and lock_provider~="inkstain" and lock_provider~="dashwallpaper" then
+        lock_provider=(home.lockscreen_style=="receipt") and "inkstain" or "native"
+        home.lockscreen_provider=lock_provider; changed=true
+    end
+    if home.lockscreen_style=="receipt" then
+        home.lockscreen_style=tostring(home.lockscreen_last_native_style or "frame")
+        changed=true
+    end
+    if home.lockscreen_style~="frame" and home.lockscreen_style~="fit" and home.lockscreen_style~="fill" then
         home.lockscreen_style="frame"; changed=true
     end
     if home.lockscreen_last_native_style~="frame" and home.lockscreen_last_native_style~="fit" and home.lockscreen_last_native_style~="fill" then
         home.lockscreen_last_native_style=(home.lockscreen_style=="fit" or home.lockscreen_style=="fill") and home.lockscreen_style or "frame"
         changed=true
     end
+    if home.lockscreen_pending_provider==nil then home.lockscreen_pending_provider=""; changed=true end
+    if home.lockscreen_dash_source==nil then home.lockscreen_dash_source=""; changed=true end
+    if type(home.lockscreen_native_snapshot)~="table" then home.lockscreen_native_snapshot={}; changed=true end
     -- Only the current local-library browser entry is persisted.
     local normalized_entry=LocalLibrary.normalize(home.local_entry_root or "")
     if normalized_entry~=tostring(home.local_entry_root or "") then
@@ -5611,7 +5649,7 @@ local HOME_ACTION_LABELS={
     extensions="插件与扩展",
 }
 local HOME_PANEL_LABELS={
-    wifi="Wi-Fi",bluetooth="蓝牙",rotate="方向锁定",screenshot="截图",full_refresh="全屏刷新",
+    wifi="Wi-Fi",bluetooth="蓝牙",rotate="方向锁定",mp="公众号",screenshot="截图",full_refresh="全屏刷新",
     downloads="下载",sync="同步",miuread_settings="觅阅设置",koreader_settings="KOReader 设置",
     koreader_file_manager="KOReader 文件管理",return_koreader="返回 KOReader",quit="退出 KOReader",
     restart="重启 KOReader",sleep="休眠",reboot="重启设备",poweroff="关机",
@@ -12106,6 +12144,7 @@ function Plugin:show_home_quick_panel(more_expanded)
             callback=function() self:_orientation_toggle_lock() end,
             hold_callback=function() self:_show_orientation_panel() end
         },
+        mp={icon="公众号",icon_key="book",label="公众号",detail="",callback=function() self:show_mp_shelf(false) end},
         screenshot={icon="▣",icon_key="screenshot",label="截图",detail="",callback=function(anchor) ScreenshotMode.start(self,anchor) end},
         full_refresh={icon="▤",icon_key="full-refresh",label="全屏刷新",detail="",callback=function() self:_home_full_refresh() end},
         downloads={icon="⇩",icon_key="download",label="下载",detail="",callback=function() self:show_downloads() end},
@@ -16829,7 +16868,7 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         -- account/health alerts occupy the home notice strip.
         alerts=home_alerts,
         lockscreen_enabled=home.lockscreen_recent~=false,
-        lockscreen_style=tostring(home.lockscreen_style or "frame"),
+        lockscreen_style=self:_home_effective_lockscreen_style(home),
         screensaver_sources=screensaver_sources,
         screensaver_file=screensaver_file,
         screensaver_book_file=normalized_reader_file(hero and hero.file or nil),
@@ -24209,60 +24248,49 @@ function Plugin:_home_native_lockscreen_style(home)
     return previous
 end
 
+function Plugin:_home_lockscreen_provider(home)
+    home=home or self:_home_preferences()
+    local provider=tostring(home.lockscreen_provider or "native")
+    if provider~="native" and provider~="inkstain" and provider~="dashwallpaper" then provider="native" end
+    return provider
+end
+
 function Plugin:_home_effective_lockscreen_style(home)
     home=home or self:_home_preferences()
-    if self:_inkstain_enabled() then return "receipt" end
+    local provider=self:_home_lockscreen_provider(home)
+    if provider=="inkstain" then return "receipt" end
+    if provider=="dashwallpaper" then return "dash" end
     return self:_home_native_lockscreen_style(home)
 end
 
 function Plugin:_home_lockscreen_style_label(home)
-    local labels={frame="画框",fit="完整",fill="铺满",receipt="墨痕壁纸"}
-    return labels[self:_home_effective_lockscreen_style(home)] or "画框"
+    home=home or self:_home_preferences()
+    local provider=self:_home_lockscreen_provider(home)
+    if provider=="inkstain" then return "墨痕壁纸" end
+    if provider=="dashwallpaper" then return "DashWallpaper" end
+    if home.lockscreen_recent==false then return "KOReader 原锁屏" end
+    local labels={frame="画框",fit="完整",fill="铺满"}
+    return "书籍封面 · "..(labels[self:_home_native_lockscreen_style(home)] or "画框")
 end
 
 function Plugin:_set_home_lockscreen_style(style)
-    local allowed={frame=true,fit=true,fill=true,receipt=true}
-    style=allowed[style] and style or "frame"
-    local home,preferences=self:_home_preferences()
-
-    if style=="receipt" then
-        if not self:_inkstain_ensure_or_prompt(true) then return false end
-        local native=self:_home_native_lockscreen_style(home)
-        if not self:_inkstain_enable() then return false end
-        home.lockscreen_last_native_style=native
-        -- Keep receipt for rollback compatibility, but the real source of truth
-        -- is InkStain's own enabled state (see _home_effective_lockscreen_style).
-        home.lockscreen_style="receipt"
-    else
-        -- Disable InkStain first. Its restore operation may rewrite KOReader's
-        -- screensaver settings, so MiuRead must apply the requested native style
-        -- only after that restore has completed.
-        if self:_inkstain_enabled() or self:_inkstain_active() then
-            if not self:_inkstain_disable() then return false end
-        end
-        home.lockscreen_style=style
-        home.lockscreen_last_native_style=style
-    end
-
-    self:_save_home_preferences(home,preferences)
-    self:_home_update_lockscreen_session(self._home_hero)
-    self:toast("锁屏封面："..self:_home_lockscreen_style_label(home),1.5)
-    return true
+    if style=="receipt" then return self:_request_lockscreen_provider("inkstain") end
+    if style=="dash" then return self:_request_lockscreen_provider("dashwallpaper") end
+    if style~="frame" and style~="fit" and style~="fill" then style="frame" end
+    return self:_activate_native_lockscreen(style)
 end
 
 function Plugin:_inkstain_open_settings()
     local instance=self:_inkstain_instance()
     if not instance then
-        self:_inkstain_ensure_or_prompt(true)
+        self:_request_lockscreen_provider("inkstain")
         return false
     end
     if type(instance.openSettings)~="function" then
-        self:info("当前墨痕版本不支持从觅阅直接打开完整设置。\n\n请更新到 InkStain 3.5.7 或更高版本。")
+        self:info("当前墨痕版本不支持从觅阅直接打开完整设置。\n\n请从墨痕插件菜单进入设置。")
         return false
     end
 
-    -- Close MiuRead's transient menu first, then let InkStain own the entire
-    -- settings UI and every callback below it (including OTA/update dialogs).
     if TransientGuard and type(TransientGuard.close_all)=="function" then
         pcall(TransientGuard.close_all)
     end
@@ -24283,30 +24311,70 @@ function Plugin:_inkstain_open_settings()
     return true
 end
 
-function Plugin:home_lockscreen_style_menu()
-    local labels={frame="画框",fit="完整",fill="铺满",receipt="墨痕壁纸"}
-    local status=self:_inkstain_status()
-    local receipt_note
-    if status.enabled then
-        receipt_note=status.active and "已开启 · 正在接管锁屏" or "已开启"
-    elseif status.loaded then
-        receipt_note="已加载 · 当前关闭"
-    elseif status.installed then
-        receipt_note="已安装 · 当前未加载"
-    else
-        receipt_note="未安装 · 点击查看说明"
-    end
-    local notes={frame="76% · 正中 · 完整封面",fit="尽量放大 · 不裁切",fill="铺满屏幕 · 居中裁切",receipt=receipt_note}
+function Plugin:home_native_lockscreen_style_menu()
+    local labels={frame="画框",fit="完整",fill="铺满"}
+    local notes={frame="76% · 正中 · 完整封面",fit="尽量放大 · 不裁切",fill="铺满屏幕 · 居中裁切"}
     local items={}
-    for _,style in ipairs({"frame","fit","fill","receipt"}) do
+    for _,style in ipairs({"frame","fit","fill"}) do
         local key=style
         items[#items+1]={
             text=labels[key],post_text=notes[key],radio=true,
-            checked_func=function() return self:_home_effective_lockscreen_style()==key end,
-            callback=function() self:_set_home_lockscreen_style(key) end,
+            checked_func=function()
+                return self:_home_lockscreen_provider()=="native" and self:_home_native_lockscreen_style()==key
+            end,
+            callback=function() self:_activate_native_lockscreen(key) end,
         }
     end
     return items
+end
+
+function Plugin:home_lockscreen_provider_menu()
+    local home=self:_home_preferences()
+    local provider=self:_home_lockscreen_provider(home)
+    local ink=self:_inkstain_status()
+    local dash=self:_dashwallpaper_status()
+    return {
+        {
+            text="书籍封面",post_text=self:_home_native_lockscreen_style(home)=="frame" and "画框" or (self:_home_native_lockscreen_style(home)=="fit" and "完整" or "铺满"),
+            radio=true,checked_func=function() return self:_home_lockscreen_provider()=="native" end,
+            callback=function() self:_request_lockscreen_provider("native") end,
+        },
+        {
+            text="墨痕壁纸",post_text=ink.loaded and "已就绪" or (ink.installed and "已安装 · 需重启加载" or "未安装 · 可直接安装"),
+            radio=true,checked_func=function() return self:_home_lockscreen_provider()=="inkstain" end,
+            callback=function() self:_request_lockscreen_provider("inkstain") end,
+        },
+        {
+            text="DashWallpaper",post_text=dash.loaded and "已就绪" or (dash.installed and "已安装 · 需重启加载" or "未安装 · 可直接安装"),
+            radio=true,checked_func=function() return self:_home_lockscreen_provider()=="dashwallpaper" end,
+            callback=function() self:_request_lockscreen_provider("dashwallpaper") end,
+        },
+    }
+end
+
+-- Compatibility alias retained for older menu callers.
+function Plugin:home_lockscreen_style_menu()
+    return self:home_lockscreen_provider_menu()
+end
+
+function Plugin:home_lockscreen_settings_menu()
+    local home=self:_home_preferences()
+    local provider=self:_home_lockscreen_provider(home)
+    local rows={
+        {text="锁屏来源",post_text=self:_home_lockscreen_style_label(home),sub_item_table_func=function() return self:home_lockscreen_provider_menu() end},
+    }
+    if provider=="native" then
+        rows[#rows+1]={text="主页锁屏显示最近阅读封面",checked_func=function() return self:_home_preferences().lockscreen_recent~=false end,keep_menu_open=true,callback=function() self:_toggle_home_lockscreen() end}
+        rows[#rows+1]={text="书籍封面样式",post_text=({frame="画框",fit="完整",fill="铺满"})[self:_home_native_lockscreen_style(home)] or "画框",enabled_func=function() return self:_home_preferences().lockscreen_recent~=false end,sub_item_table_func=function() return self:home_native_lockscreen_style_menu() end}
+    elseif provider=="inkstain" then
+        rows[#rows+1]={text="墨痕设置",post_text=self:_inkstain_status().loaded and "打开插件设置" or "需重启加载",callback=function() self:_inkstain_open_settings() end}
+        rows[#rows+1]={text="立即刷新壁纸",callback=function() self:_inkstain_refresh() end}
+    elseif provider=="dashwallpaper" then
+        rows[#rows+1]={text="当前壁纸源",post_text=self:_dashwallpaper_source_label(),sub_item_table_func=function() return self:_dashwallpaper_source_menu(false) end}
+        rows[#rows+1]={text="立即更新壁纸",callback=function() self:_dashwallpaper_refresh() end}
+        rows[#rows+1]={text="DashWallpaper 设置",callback=function() self:_dashwallpaper_open_settings() end}
+    end
+    return rows
 end
 
 function Plugin:_shelf_filter_prefs()
@@ -29201,6 +29269,550 @@ function Plugin:_inkstain_refresh()
     end
     self:info("墨痕壁纸刷新失败，请从墨痕插件菜单重试。")
     return false
+end
+
+-- ============================================================
+-- Unified lockscreen providers (beta.18)
+--
+-- MiuRead owns only provider selection and rollback. InkStain and
+-- DashWallpaper remain independent plugins and continue to own wallpaper
+-- generation/update logic. A provider switch is committed only after the new
+-- source has produced a usable image; the old provider is the rollback target.
+-- ============================================================
+local function lockscreen_provider_valid(value)
+    value=tostring(value or "")
+    return value=="native" or value=="inkstain" or value=="dashwallpaper"
+end
+
+local function setting_snapshot_item(key)
+    local value=G_reader_settings:readSetting(key)
+    return {has=value~=nil,value=U.copy(value)}
+end
+
+function Plugin:_lockscreen_external_supported()
+    if Device and Device.isAndroid and Device:isAndroid() then
+        return false,"Android 当前不支持由觅阅接管 KOReader 锁屏壁纸；扩展仍可正常安装和使用。"
+    end
+    if Device and type(Device.canSuspend)=="function" and not Device:canSuspend() then
+        return false,"当前设备不支持由觅阅切换锁屏壁纸。扩展仍可正常安装和使用。"
+    end
+    return true
+end
+
+function Plugin:_lockscreen_capture_native_snapshot(home,preferences)
+    home=home or self:_home_preferences()
+    local current=type(home.lockscreen_native_snapshot)=="table" and home.lockscreen_native_snapshot or {}
+    if current.version==1 and type(current.values)=="table" then return current end
+    local values={}
+    for _,key in ipairs(INKSTAIN_SCREENSAVER_KEYS) do values[key]=setting_snapshot_item(key) end
+    local snapshot={version=1,captured_at=os.time(),values=values}
+    home.lockscreen_native_snapshot=snapshot
+    if preferences then self:_save_home_preferences(home,preferences) end
+    return snapshot
+end
+
+function Plugin:_lockscreen_restore_native_snapshot(home,preferences)
+    home=home or self:_home_preferences()
+    local snapshot=type(home.lockscreen_native_snapshot)=="table" and home.lockscreen_native_snapshot or {}
+    local restored=false
+    if snapshot.version==1 and type(snapshot.values)=="table" then
+        for _,key in ipairs(INKSTAIN_SCREENSAVER_KEYS) do
+            local item=snapshot.values[key]
+            if type(item)=="table" and item.has==true then
+                G_reader_settings:saveSetting(key,U.copy(item.value))
+            elseif G_reader_settings.delSetting then
+                G_reader_settings:delSetting(key)
+            end
+        end
+        restored=true
+    else
+        -- A manually configured DashWallpaper from before beta.18 has no
+        -- MiuRead snapshot. Fall back to KOReader's normal document-cover mode
+        -- rather than leaving a stale third-party PNG selected forever.
+        G_reader_settings:saveSetting("screensaver_type","document_cover")
+        if G_reader_settings.delSetting then
+            G_reader_settings:delSetting("screensaver_document_cover")
+        end
+        G_reader_settings:saveSetting("screensaver_show_message",false)
+    end
+    home.lockscreen_native_snapshot={}
+    if G_reader_settings.flush then G_reader_settings:flush() end
+    if preferences then self:_save_home_preferences(home,preferences) end
+    return restored
+end
+
+function Plugin:_dashwallpaper_instance()
+    local ok,PluginLoader=pcall(require,"pluginloader")
+    if ok and PluginLoader and type(PluginLoader.getPluginInstance)=="function" then
+        local instance=PluginLoader:getPluginInstance("dashwallpaper")
+            or PluginLoader:getPluginInstance("DashWallpaper")
+        if type(instance)=="table" then return instance end
+    end
+    if self.ui and type(self.ui.dashwallpaper)=="table" then return self.ui.dashwallpaper end
+    return nil
+end
+
+function Plugin:_find_dashwallpaper_plugin()
+    if self:_dashwallpaper_instance() then return "loaded" end
+    local search_dirs={}
+    local ok_ds,DataStorage=pcall(require,"datastorage")
+    if ok_ds and DataStorage then
+        local base=DataStorage:getDataDir()
+        if base then
+            search_dirs[#search_dirs+1]=base.."/plugins"
+            search_dirs[#search_dirs+1]=base.."/koreader/plugins"
+        end
+    end
+    if #search_dirs==0 then search_dirs={"./plugins","./koreader/plugins"} end
+    for _,dir in ipairs(search_dirs) do
+        for _,name in ipairs({"DashWallpaper.koplugin","dashwallpaper.koplugin"}) do
+            local main=dir.."/"..name.."/main.lua"
+            if lfs.attributes(main,"mode")=="file" then return main end
+        end
+    end
+    return nil
+end
+
+function Plugin:_dashwallpaper_available()
+    if self:_dashwallpaper_instance() then return true end
+    local ok,path=pcall(Plugin._find_dashwallpaper_plugin,self)
+    return ok and path~=nil
+end
+
+function Plugin:_dashwallpaper_output_path(instance)
+    instance=instance or self:_dashwallpaper_instance()
+    if instance and type(instance.findScreensaverDir)=="function" then
+        local ok,dir=pcall(instance.findScreensaverDir,instance)
+        if ok and tostring(dir or "")~="" then return tostring(dir).."/dashwallpaper.png" end
+    end
+    local ok_ds,DataStorage=pcall(require,"datastorage")
+    if ok_ds and DataStorage then return tostring(DataStorage:getDataDir()).."/screensaver/dashwallpaper.png" end
+    return ""
+end
+
+function Plugin:_dashwallpaper_png_valid(path)
+    path=tostring(path or "")
+    if path=="" or lfs.attributes(path,"mode")~="file" then return false end
+    local f=io.open(path,"rb")
+    if not f then return false end
+    local head=f:read(8); f:close()
+    return head=="\137PNG\r\n\26\n"
+end
+
+function Plugin:_dashwallpaper_status()
+    local instance=self:_dashwallpaper_instance()
+    local installed=self:_dashwallpaper_available()
+    local cover=tostring(G_reader_settings:readSetting("screensaver_document_cover") or "")
+    local active=cover:lower():find("dashwallpaper.png",1,true)~=nil
+    local index=1
+    if instance then
+        index=tonumber(instance.auto_index) or 1
+        if type(instance.settings)=="table" and type(instance.settings.readSetting)=="function" then
+            index=tonumber(instance.settings:readSetting("auto_index")) or index
+        end
+    end
+    return {installed=installed,loaded=instance~=nil,active=active,index=index,path=cover}
+end
+
+function Plugin:_dashwallpaper_source_label()
+    local home=self:_home_preferences()
+    local instance=self:_dashwallpaper_instance()
+    if instance and type(instance.walls)=="table" and #instance.walls>0 then
+        local index=tonumber(instance.auto_index) or tonumber(instance.settings and instance.settings:readSetting("auto_index")) or 1
+        local wall=instance.walls[index] or instance.walls[1]
+        if type(wall)=="table" and tostring(wall.name or "")~="" then return tostring(wall.name) end
+    end
+    local saved=tostring(home.lockscreen_dash_source or "")
+    return saved~="" and saved or "未选择"
+end
+
+function Plugin:_dashwallpaper_set_source(instance,index,name)
+    if not instance then return end
+    index=math.max(1,tonumber(index) or 1)
+    instance.auto_index=index
+    if type(instance.settings)=="table" and type(instance.settings.saveSetting)=="function" then
+        pcall(instance.settings.saveSetting,instance.settings,"auto_index",index)
+        if type(instance.settings.flush)=="function" then pcall(instance.settings.flush,instance.settings) end
+    end
+    local home,preferences=self:_home_preferences()
+    home.lockscreen_dash_source=tostring(name or "")
+    self:_save_home_preferences(home,preferences)
+end
+
+function Plugin:_dashwallpaper_apply_config(path)
+    path=tostring(path or "")
+    if not self:_dashwallpaper_png_valid(path) then return false,"壁纸文件不存在或不是有效 PNG" end
+    local ok,err=pcall(function()
+        G_reader_settings:saveSetting("screensaver_type","document_cover")
+        G_reader_settings:saveSetting("screensaver_document_cover",path)
+        G_reader_settings:saveSetting("screensaver_show_message",false)
+        if G_reader_settings.flush then G_reader_settings:flush() end
+    end)
+    if not ok then return false,tostring(err) end
+    local actual=tostring(G_reader_settings:readSetting("screensaver_document_cover") or "")
+    if actual~=path then return false,"KOReader 未保存新的壁纸路径" end
+    return true
+end
+
+function Plugin:_activate_dashwallpaper_file(path,index,name)
+    local home,preferences=self:_home_preferences()
+    local old=self:_home_lockscreen_provider(home)
+    local rollback_dash=tostring(G_reader_settings:readSetting("screensaver_document_cover") or "")
+    if old=="inkstain" then
+        if not self:_inkstain_disable() then return false end
+        -- InkStain restores the native settings it captured when it was enabled.
+        -- Capture that exact native state before Dash takes over, otherwise a
+        -- later Dash -> native switch would only be able to guess defaults.
+        home,preferences=self:_home_preferences()
+        self:_lockscreen_capture_native_snapshot(home,preferences)
+    elseif old=="native" then
+        self:_lockscreen_capture_native_snapshot(home,preferences)
+    end
+    local ok,err=self:_dashwallpaper_apply_config(path)
+    if not ok then
+        if old=="inkstain" then pcall(function() self:_inkstain_enable() end)
+        elseif old=="native" then self:_lockscreen_restore_native_snapshot(home,preferences)
+        elseif old=="dashwallpaper" and rollback_dash~="" then pcall(function() self:_dashwallpaper_apply_config(rollback_dash) end) end
+        self:info("无法切换到 DashWallpaper。\n\n"..tostring(err or "未知错误").."\n\n原锁屏设置已保留。")
+        return false
+    end
+    home,preferences=self:_home_preferences()
+    home.lockscreen_provider="dashwallpaper"
+    home.lockscreen_pending_provider=""
+    home.lockscreen_recent=true
+    home.lockscreen_dash_source=tostring(name or home.lockscreen_dash_source or "")
+    self:_save_home_preferences(home,preferences)
+    self:_dashwallpaper_set_source(self:_dashwallpaper_instance(),index,name)
+    self:_home_update_lockscreen_session(self._home_hero)
+    self:status_toast("锁屏壁纸","已切换到 DashWallpaper",3)
+    return true
+end
+
+function Plugin:_dashwallpaper_apply_index(index,activate)
+    local instance=self:_dashwallpaper_instance()
+    if not instance then
+        self:_set_lockscreen_pending_provider("dashwallpaper")
+        self:_prompt_lockscreen_restart("dashwallpaper")
+        return false
+    end
+    local walls=type(instance.walls)=="table" and instance.walls or {}
+    index=math.max(1,tonumber(index) or 1)
+    local wall=walls[index]
+    if type(wall)~="table" then self:info("没有找到这个 DashWallpaper 壁纸源。") return false end
+    self:status_toast("DashWallpaper","正在更新“"..tostring(wall.name or "看板壁纸").."”",4)
+    UIManager:scheduleIn(.12,function()
+        local ok,result,message=xpcall(function()
+            return instance:downloadAndSave(wall,10)
+        end,debug.traceback)
+        if not ok then
+            self:info("DashWallpaper 更新失败。\n\n"..tostring(result).."\n\n当前锁屏没有改变。")
+            return
+        end
+        if result~=true then
+            self:info("DashWallpaper 更新失败。\n\n"..tostring(message or "下载未完成").."\n\n当前锁屏没有改变。")
+            return
+        end
+        local path=self:_dashwallpaper_output_path(instance)
+        if not self:_dashwallpaper_png_valid(path) then
+            local from_message=tostring(message or ""):match("([^%s]+dashwallpaper%.png)")
+            if from_message and self:_dashwallpaper_png_valid(from_message) then path=from_message end
+        end
+        if not self:_dashwallpaper_png_valid(path) then
+            self:info("DashWallpaper 已返回成功，但没有找到有效的壁纸文件。\n\n当前锁屏没有改变。")
+            return
+        end
+        self:_dashwallpaper_set_source(instance,index,wall.name)
+        if activate~=false then
+            self:_activate_dashwallpaper_file(path,index,wall.name)
+        elseif self:_home_lockscreen_provider()=="dashwallpaper" then
+            local config_ok,config_err=self:_dashwallpaper_apply_config(path)
+            if config_ok then self:status_toast("DashWallpaper","壁纸已更新",2.5)
+            else self:info("壁纸已经生成，但 KOReader 锁屏路径更新失败。\n\n"..tostring(config_err or "")) end
+        else
+            self:status_toast("DashWallpaper","壁纸已更新",2.5)
+        end
+    end)
+    return true
+end
+
+function Plugin:_dashwallpaper_source_menu(first_use)
+    local instance=self:_dashwallpaper_instance()
+    if not instance then
+        return {{text="DashWallpaper 尚未加载",post_text="完整重启 KOReader 后继续",callback=function() self:_prompt_lockscreen_restart("dashwallpaper") end}}
+    end
+    local walls=type(instance.walls)=="table" and instance.walls or {}
+    local rows={}
+    local current=tonumber(instance.auto_index) or tonumber(instance.settings and instance.settings:readSetting("auto_index")) or 1
+    for i,wall in ipairs(walls) do
+        local index=i
+        rows[#rows+1]={
+            text=tostring(wall.name or ("壁纸源 "..tostring(i))),radio=true,
+            checked_func=function() return not first_use and self:_home_lockscreen_provider()=="dashwallpaper" and current==index end,
+            callback=function() self:_dashwallpaper_apply_index(index,true) end,
+        }
+    end
+    if #rows==0 then rows[#rows+1]={text="暂无壁纸源",post_text="请从 DashWallpaper 设置导入",enabled=false} end
+    return rows
+end
+
+function Plugin:_dashwallpaper_refresh()
+    local instance=self:_dashwallpaper_instance()
+    if not instance then self:_prompt_lockscreen_restart("dashwallpaper"); return false end
+    local index=tonumber(instance.auto_index) or tonumber(instance.settings and instance.settings:readSetting("auto_index")) or 1
+    return self:_dashwallpaper_apply_index(index,false)
+end
+
+function Plugin:_dashwallpaper_open_settings()
+    local instance=self:_dashwallpaper_instance()
+    if not instance then
+        self:_request_lockscreen_provider("dashwallpaper")
+        return false
+    end
+    if type(instance.buildSubmenu)~="function" then
+        self:info("当前 DashWallpaper 版本没有可从觅阅直接打开的设置菜单。")
+        return false
+    end
+    local ok,rows=pcall(instance.buildSubmenu,instance)
+    if not ok or type(rows)~="table" then
+        self:info("无法打开 DashWallpaper 设置。")
+        return false
+    end
+    self:list("DashWallpaper 设置",rows)
+    return true
+end
+
+function Plugin:_set_lockscreen_pending_provider(provider)
+    provider=tostring(provider or "")
+    if provider~="inkstain" and provider~="dashwallpaper" then provider="" end
+    local home,preferences=self:_home_preferences()
+    home.lockscreen_pending_provider=provider
+    self:_save_home_preferences(home,preferences)
+    return provider
+end
+
+function Plugin:_prompt_lockscreen_restart(provider)
+    provider=tostring(provider or "")
+    local label=provider=="inkstain" and "墨痕壁纸" or "DashWallpaper"
+    UIManager:show(ConfirmBox:new{
+        text=label.."已经安装，但 KOReader 需要完整重启后才能加载插件。\n\n重启后觅阅会自动继续刚才的锁屏设置，不需要重新操作。",
+        ok_text="现在重启",cancel_text="稍后",
+        ok_callback=function() self:_restart_koreader("lockscreen provider "..provider) end,
+    })
+    return true
+end
+
+function Plugin:_activate_inkstain_lockscreen()
+    local home,preferences=self:_home_preferences()
+    local old=self:_home_lockscreen_provider(home)
+    local dash_path=""
+    local dash_snapshot=nil
+    if old=="dashwallpaper" then
+        dash_path=tostring(G_reader_settings:readSetting("screensaver_document_cover") or "")
+        dash_snapshot=U.copy(home.lockscreen_native_snapshot or {})
+        self:_lockscreen_restore_native_snapshot(home,preferences)
+    end
+    if not self:_inkstain_enable() then
+        if old=="dashwallpaper" and dash_path~="" then
+            pcall(function() self:_dashwallpaper_apply_config(dash_path) end)
+            -- Restoring native settings clears MiuRead's snapshot. If InkStain
+            -- could not start, put it back so the still-active Dash provider can
+            -- later return to the exact native lockscreen.
+            local rollback_home,rollback_preferences=self:_home_preferences()
+            rollback_home.lockscreen_native_snapshot=type(dash_snapshot)=="table" and dash_snapshot or {}
+            self:_save_home_preferences(rollback_home,rollback_preferences)
+        end
+        return false
+    end
+    home,preferences=self:_home_preferences()
+    home.lockscreen_provider="inkstain"
+    home.lockscreen_pending_provider=""
+    home.lockscreen_recent=true
+    self:_save_home_preferences(home,preferences)
+    self:_home_update_lockscreen_session(self._home_hero)
+    self:status_toast("锁屏壁纸","已切换到墨痕壁纸",3)
+    return true
+end
+
+function Plugin:_activate_native_lockscreen(style)
+    local home,preferences=self:_home_preferences()
+    local old=self:_home_lockscreen_provider(home)
+    style=tostring(style or home.lockscreen_last_native_style or "frame")
+    if style~="frame" and style~="fit" and style~="fill" then style="frame" end
+    if old=="inkstain" then
+        if not self:_inkstain_disable() then return false end
+    elseif old=="dashwallpaper" then
+        self:_lockscreen_restore_native_snapshot(home,preferences)
+    end
+    home,preferences=self:_home_preferences()
+    home.lockscreen_provider="native"
+    home.lockscreen_pending_provider=""
+    home.lockscreen_style=style
+    home.lockscreen_last_native_style=style
+    home.lockscreen_recent=true
+    self:_save_home_preferences(home,preferences)
+    self:_home_update_lockscreen_session(self._home_hero)
+    self:status_toast("锁屏壁纸","书籍封面 · "..(({frame="画框",fit="完整",fill="铺满"})[style] or "画框"),2.5)
+    return true
+end
+
+function Plugin:_request_lockscreen_provider(provider)
+    provider=tostring(provider or "native")
+    if not lockscreen_provider_valid(provider) then provider="native" end
+    if provider=="native" then return self:_activate_native_lockscreen(self:_home_native_lockscreen_style()) end
+    local supported,reason=self:_lockscreen_external_supported()
+    if not supported then self:info(reason); return false end
+
+    local id,label,available,instance
+    if provider=="inkstain" then
+        id,label="inkstain","墨痕壁纸"
+        available=self:_inkstain_available(); instance=self:_inkstain_instance()
+    else
+        id,label="dashwallpaper","DashWallpaper"
+        available=self:_dashwallpaper_available(); instance=self:_dashwallpaper_instance()
+    end
+    if instance then
+        if provider=="inkstain" then return self:_activate_inkstain_lockscreen() end
+        self:list("选择 DashWallpaper 壁纸源",self:_dashwallpaper_source_menu(true))
+        return true
+    end
+    if available then
+        self:_set_lockscreen_pending_provider(provider)
+        return self:_prompt_lockscreen_restart(provider)
+    end
+
+    UIManager:show(ConfirmBox:new{
+        text="使用"..label.."需要先安装对应插件。\n\n安装过程仍使用觅阅扩展中心的官方来源检查、完整性验证和失败回滚；安装成功后重启即可自动继续。",
+        ok_text="安装并使用",cancel_text="取消",
+        ok_callback=function()
+            self:_set_lockscreen_pending_provider(provider)
+            local ok_center,center=pcall(require,"miuread.extension_center")
+            if not ok_center or not center or type(center.install_catalog_id)~="function" then
+                self:_set_lockscreen_pending_provider("")
+                self:info("扩展中心暂时无法启动安装。当前锁屏没有改变。")
+                return
+            end
+            if center.install_catalog_id(self,id)~=true then self:_set_lockscreen_pending_provider("") end
+        end,
+    })
+    return true
+end
+
+function Plugin:_lockscreen_repo_matches_provider(repo,provider)
+    repo=tostring(repo or "")
+    if provider=="inkstain" then
+        return repo=="Estela-Zelin84/inkstain.koplugin" or repo=="miumiupy98-art/inkstain.koplugin"
+    end
+    if provider=="dashwallpaper" then return repo=="RC-APC/DashWallpaper.koplugin" end
+    return false
+end
+
+function Plugin:_on_extension_install_complete(repo,result)
+    local home=self:_home_preferences()
+    local pending=tostring(home.lockscreen_pending_provider or "")
+    if pending=="" or not self:_lockscreen_repo_matches_provider(repo,pending) then return false end
+    logger.info("[MiuRead][Lockscreen] provider install complete","provider=",pending,"dir=",tostring(result and result.dir or ""))
+    self:_prompt_lockscreen_restart(pending)
+    return true
+end
+
+function Plugin:_on_extension_install_failed(repo)
+    local home=self:_home_preferences()
+    local pending=tostring(home.lockscreen_pending_provider or "")
+    if pending~="" and self:_lockscreen_repo_matches_provider(repo,pending) then
+        self:_set_lockscreen_pending_provider("")
+        logger.warn("[MiuRead][Lockscreen] provider install failed; pending intent cleared",tostring(repo))
+        return true
+    end
+    return false
+end
+
+function Plugin:_resume_pending_lockscreen_provider()
+    local home=self:_home_preferences()
+    local pending=tostring(home.lockscreen_pending_provider or "")
+    if pending~="inkstain" and pending~="dashwallpaper" then return false end
+    if pending=="inkstain" then
+        if self:_inkstain_instance() then return self:_activate_inkstain_lockscreen() end
+        if not self:_inkstain_available() then self:_set_lockscreen_pending_provider(""); return false end
+        return false
+    end
+    local instance=self:_dashwallpaper_instance()
+    if not instance then
+        if not self:_dashwallpaper_available() then self:_set_lockscreen_pending_provider("") end
+        return false
+    end
+    local saved=tostring(home.lockscreen_dash_source or "")
+    if saved~="" and type(instance.walls)=="table" then
+        for i,wall in ipairs(instance.walls) do
+            if tostring(wall and wall.name or "")==saved then return self:_dashwallpaper_apply_index(i,true) end
+        end
+    end
+    self:list("继续设置 DashWallpaper",self:_dashwallpaper_source_menu(true))
+    return true
+end
+
+function Plugin:_reconcile_lockscreen_provider(show_notice)
+    local home,preferences=self:_home_preferences()
+    local provider=self:_home_lockscreen_provider(home)
+    local pending=tostring(home.lockscreen_pending_provider or "")
+    local ink=self:_inkstain_status()
+    local dash=self:_dashwallpaper_status()
+    local changed=false
+    local notice=nil
+
+    if provider=="native" and pending=="" then
+        if ink.enabled or ink.active then
+            home.lockscreen_provider="inkstain"; home.lockscreen_recent=true; changed=true
+            notice="已识别现有墨痕锁屏设置"
+        elseif dash.active and dash.installed then
+            home.lockscreen_provider="dashwallpaper"; home.lockscreen_recent=true; changed=true
+            notice="已识别现有 DashWallpaper 锁屏设置"
+        end
+    elseif provider=="inkstain" then
+        if not ink.installed then
+            pcall(function() self:_inkstain_disable() end)
+            home.lockscreen_provider="native"
+            home.lockscreen_style=self:_home_native_lockscreen_style(home)
+            home.lockscreen_recent=true
+            changed=true; notice="墨痕插件已不存在，锁屏已恢复为书籍封面"
+        elseif not ink.enabled and not ink.active and pending=="" then
+            home.lockscreen_provider="native"
+            home.lockscreen_style=self:_home_native_lockscreen_style(home)
+            home.lockscreen_recent=true
+            changed=true; notice="墨痕已关闭，锁屏已恢复为书籍封面"
+        end
+    elseif provider=="dashwallpaper" then
+        if not dash.installed then
+            self:_lockscreen_restore_native_snapshot(home,preferences)
+            home,preferences=self:_home_preferences()
+            home.lockscreen_provider="native"
+            home.lockscreen_style=self:_home_native_lockscreen_style(home)
+            home.lockscreen_recent=true
+            changed=true; notice="DashWallpaper 插件已不存在，锁屏已恢复为书籍封面"
+        elseif not dash.active then
+            local path=self:_dashwallpaper_output_path(self:_dashwallpaper_instance())
+            if self:_dashwallpaper_png_valid(path) then
+                local ok=self:_dashwallpaper_apply_config(path)
+                if not ok then
+                    self:_lockscreen_restore_native_snapshot(home,preferences)
+                    home,preferences=self:_home_preferences()
+                    home.lockscreen_provider="native"; home.lockscreen_recent=true
+                    changed=true; notice="DashWallpaper 锁屏路径失效，已恢复为书籍封面"
+                end
+            else
+                self:_lockscreen_restore_native_snapshot(home,preferences)
+                home,preferences=self:_home_preferences()
+                home.lockscreen_provider="native"; home.lockscreen_recent=true
+                changed=true; notice="DashWallpaper 壁纸不存在，已恢复为书籍封面"
+            end
+        end
+    end
+
+    if changed then
+        self:_save_home_preferences(home,preferences)
+        self:_home_update_lockscreen_session(self._home_hero)
+        if show_notice and notice then self:status_toast("锁屏壁纸",notice,4) end
+    end
+    return changed
 end
 
 return Plugin
