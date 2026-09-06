@@ -1,6 +1,6 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.6.7",
+    VERSION = "5.8.0-beta.16",
     SCHEMA = 132,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
@@ -8,11 +8,11 @@ local C = {
 
     -- 当前安装包自身仍有 stable/beta 身份；用户选择的 OTA 通道独立保存。
     -- beta.20 起所有实时更新清单都由统一仓库 miuread-koreader 提供。
-    UPDATE_CHANNEL = "stable",
-    UPDATE_CHANNEL_LABEL = "正式通道",
-    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+    UPDATE_CHANNEL = "beta",
+    UPDATE_CHANNEL_LABEL = "内测通道",
+    UPDATE_MANIFEST = "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     UPDATE_MANIFESTS = {
-        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/stable-channel/update.json",
+        "https://github.com/miumiupy98-art/miuread-koreader/releases/download/beta-channel/update-beta.json",
     },
     UPDATE_CHANNELS = {
         stable = {
@@ -38,6 +38,31 @@ local C = {
         "https://gh-proxy.com/",
         "https://ghproxy.net/",
     },
+
+    -- beta.15 extension packages keep GitHub Releases as the source of truth, but
+    -- large bytes may travel through a faster domestic route. The GitHub Chinese
+    -- community mirror is the preferred download route; every route is still
+    -- checked against the official asset size / digest before installation.
+    EXTENSION_DOWNLOAD_ROUTES = {
+        { key = "git_zh", label = "GitHub 中文社区", mode = "replace_host", base = "https://mirrors.git-zh.com", preferred = true },
+        { key = "direct", label = "GitHub 官方", mode = "direct" },
+        { key = "ghfast", label = "ghfast", mode = "prefix", base = "https://ghfast.top/" },
+        { key = "gh_proxy", label = "gh-proxy", mode = "prefix", base = "https://gh-proxy.com/" },
+        { key = "ghproxy", label = "ghproxy.net", mode = "prefix", base = "https://ghproxy.net/" },
+    },
+    EXTENSION_LARGE_FILE_BYTES = 5 * 1024 * 1024,
+    EXTENSION_RESUME_BYTES = 512 * 1024,
+    EXTENSION_CONNECT_TIMEOUT_SECONDS = 20,
+    EXTENSION_STALL_SECONDS = 90,
+    EXTENSION_PROBE_BYTES = 128 * 1024,
+    -- Large-package route probing is deliberately bounded. Probe only the
+    -- three most useful routes (GitHub 中文社区 / GitHub 官方 / ghfast) so
+    -- testing a slow proxy never adds a minute before a real transfer starts.
+    EXTENSION_PROBE_MAX_ROUTES = 3,
+    EXTENSION_PROBE_CONNECT_TIMEOUT_SECONDS = 4,
+    EXTENSION_PROBE_MAX_SECONDS = 5,
+    EXTENSION_RETRY_BASE_SECONDS = 10,
+    EXTENSION_RETRY_MAX_SECONDS = 60,
 
     AUTO_UPDATE_INTERVAL = 24 * 60 * 60,
     AUTO_UPDATE_RETRY_INTERVAL = 6 * 60 * 60,

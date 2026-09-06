@@ -9,6 +9,11 @@ local U=require("miuread.util")
 local Cookies=require("miuread.cookies")
 local logger=require("logger")
 local Store={}; Store.__index=Store
+-- ReaderUI and FileManager can keep separate plugin instances alive. They
+-- must share the live settings owner: flushing either independent snapshot
+-- would otherwise overwrite preferences and local-library scans from the other.
+-- Weak values release unused stores; isolated download workers keep private state.
+local shared_stores=setmetatable({},{__mode="v"})
 local function generate_login_session_id()
     return tostring(os.time()).."-"..tostring(math.random(100000,999999))
 end
@@ -315,8 +320,14 @@ end
 function Store:new(options)
     options=options or {}
     local data=options.data_dir or (DataStorage:getFullDataDir().."/"..Config.DATA_DIR)
+    -- Preserve Store:new()'s historical directory-repair guarantee even when
+    -- ReaderUI/FileManager reuse the same live Store instance.
     U.mkdir(data); U.mkdir(data.."/books"); U.mkdir(data.."/mp"); U.mkdir(data.."/covers"); U.mkdir(data.."/temp"); U.mkdir(data.."/updates"); U.mkdir(data.."/prefetch")
     local settings_path=options.settings_path or (DataStorage:getSettingsDir().."/miuread.lua")
+    local shared_key=settings_path.."\0"..data
+    if options.isolated~=true and shared_stores[shared_key] then
+        return shared_stores[shared_key]
+    end
     local settings_backup_path=settings_path..".miuread-backup"
     local restored_settings_source=nil
     if options.isolated~=true then
@@ -361,6 +372,7 @@ function Store:new(options)
     if not o.isolated then
         local valid=settings_file_valid(o.settings_path)
         if valid then refresh_settings_backup(o.settings_path,o.settings_backup_path) end
+        shared_stores[shared_key]=o
     end
     return o
 end

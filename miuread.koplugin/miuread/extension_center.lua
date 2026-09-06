@@ -400,6 +400,9 @@ local function meta_cache_get(plugin,repo,allow_stale)
     local entry=value.entries[tostring(repo or "")]
     if type(entry)~="table" then return nil end
     local age=os.time()-(tonumber(entry.updated_at) or 0)
+    if type(entry.repo_info)=="table" then
+        entry.repo_info.release_missing=entry.release_missing==true
+    end
     if allow_stale==true or age<=META_TTL then return entry,age>META_TTL end
 end
 
@@ -445,11 +448,82 @@ local function compact_release(release)
             name=tostring(asset.name or ""),
             browser_download_url=tostring(asset.browser_download_url or ""),
             size=tonumber(asset.size) or 0,
+            digest=tostring(asset.digest or ""),
+            content_type=tostring(asset.content_type or ""),
         }
     end
     return {
         tag_name=tostring(release.tag_name or ""),name=tostring(release.name or ""),assets=assets,
     }
+end
+
+
+local function contents_have_plugin_markers(items)
+    if type(items)~="table" then return false end
+    local main,meta=false,false
+    for _,item in ipairs(items) do
+        if type(item)=="table" and tostring(item.type or "")~="dir" then
+            local name=tostring(item.name or "")
+            if name=="main.lua" then main=true elseif name=="_meta.lua" then meta=true end
+        end
+    end
+    return main and meta
+end
+
+-- Confirm source installability with GitHub itself. This replaces the old
+-- per-plugin source allow-list: source ZIPs are considered only after Release
+-- resolution proves there is no usable asset, and only when Contents API shows
+-- a complete KOReader plugin payload.
+local function probe_source_installability(plugin,repo,repo_info)
+    repo_info=type(repo_info)=="table" and repo_info or {}
+    local branch=trim(repo_info.default_branch or "main")
+    if branch=="" then branch="main" end
+    local root,root_error=github_json(plugin,"https://api.github.com/repos/"..repo.."/contents?ref="..url_encode(branch))
+    if type(root)~="table" then
+        return {installable=nil,branch=branch,error=tostring(root_error or "contents_unavailable")}
+    end
+    if contents_have_plugin_markers(root) then
+        return {installable=true,branch=branch,path="",kind="root"}
+    end
+
+    local entry=known_repo(repo) or {}
+    local expected=trim(entry.install_dirname or repo:match("([^/]+)$") or "")
+    local dirs={}
+    for _,item in ipairs(root) do
+        if type(item)=="table" and tostring(item.type or "")=="dir" then
+            local name=tostring(item.name or "")
+            if name:match("%.koplugin$") then dirs[#dirs+1]=name end
+        end
+    end
+    table.sort(dirs)
+    local candidates={}
+    for _,name in ipairs(dirs) do if name==expected then candidates={name}; break end end
+    if #candidates==0 and #dirs==1 then candidates={dirs[1]} end
+    if #candidates==0 then
+        return {installable=false,branch=branch,path="",reason=#dirs>1 and "源码包含多个 .koplugin 目录" or "源码缺少 main.lua / _meta.lua"}
+    end
+
+    local child_name=candidates[1]
+    local child,child_error=github_json(plugin,"https://api.github.com/repos/"..repo.."/contents/"..url_encode(child_name).."?ref="..url_encode(branch))
+    if type(child)~="table" then
+        return {installable=nil,branch=branch,path=child_name,error=tostring(child_error or "contents_unavailable")}
+    end
+    if contents_have_plugin_markers(child) then
+        return {installable=true,branch=branch,path=child_name,kind="nested"}
+    end
+    return {installable=false,branch=branch,path=child_name,reason="源码目录缺少 main.lua / _meta.lua"}
+end
+
+local function maybe_probe_source(plugin,repo,repo_info,release,release_error)
+    local entry=known_repo(repo)
+    if not entry or type(entry.package)=="table" then return nil end
+    local should_probe=release_error=="no_release"
+    if type(release)=="table" then
+        local _,err,candidates=Catalog.release_package_source(entry,release,nil)
+        should_probe=err=="最新 Release 没有可识别的插件 ZIP" and #(candidates or {})==0
+    end
+    if not should_probe then return nil end
+    return probe_source_installability(plugin,repo,repo_info)
 end
 
 local function display_repo_name(repo_info,fallback)
@@ -526,13 +600,23 @@ local function show_menu(plugin,title,items)
     UIManager:show(Menu:new{title=title,item_table=items,items_per_page=8})
 end
 
+local function route_label(key)
+    key=tostring(key or "")
+    for _,route in ipairs(Config.EXTENSION_DOWNLOAD_ROUTES or {}) do
+        if tostring(route.key or "")==key then return tostring(route.label or key) end
+    end
+    return key~="" and key or "下载通道"
+end
+
 local function network_mode_label(plugin)
     local value=extension_network(plugin)
-    if value.mode=="direct" then return "GitHub 直连" end
+    if value.mode=="direct" then return "GitHub 官方" end
     if value.mode=="custom" then return "自定义镜像" end
+    local route=value.mode:match("^route:(.+)$")
+    if route then return route_label(route) end
     local index=value.mode:match("^mirror:(%d+)$")
-    if index then return "镜像 "..index end
-    return "自动"
+    if index then return "旧镜像 "..index end
+    return "自动（推荐）"
 end
 
 local function set_network_mode(plugin,mode)
@@ -572,17 +656,22 @@ end
 local function download_source_menu(plugin)
     local current=extension_network(plugin)
     local rows={
-        {text="自动",post_text=current.mode=="auto" and "当前 · 按固定顺序尝试全部下载源" or "按固定顺序尝试全部下载源",callback=function() set_network_mode(plugin,"auto") end},
-        {text="GitHub 直连",post_text=current.mode=="direct" and "当前" or "",callback=function() set_network_mode(plugin,"direct") end},
+        {text="自动（推荐）",post_text=current.mode=="auto" and "当前 · 中文社区优先，大文件有界测速" or "中文社区优先，大文件有界测速",callback=function() set_network_mode(plugin,"auto") end},
     }
-    for index,_ in ipairs(Config.GITHUB_MIRRORS or {}) do
-        local key="mirror:"..tostring(index)
-        rows[#rows+1]={text="镜像 "..tostring(index),post_text=current.mode==key and "当前" or "",callback=function() set_network_mode(plugin,key) end}
+    for _,route in ipairs(Config.EXTENSION_DOWNLOAD_ROUTES or {}) do
+        local key=tostring(route.key or "")
+        if key~="" then
+            local mode=key=="direct" and "direct" or ("route:"..key)
+            local note=current.mode==mode and "当前" or ""
+            if route.preferred==true and note=="" then note="默认首选" end
+            rows[#rows+1]={text=tostring(route.label or key),post_text=note,callback=function() set_network_mode(plugin,mode) end}
+        end
     end
     rows[#rows+1]={text="自定义镜像",post_text=current.mode=="custom" and "当前" or (current.custom_prefix~="" and "已配置 · 自动模式最后尝试" or "未配置"),keep_menu_open=true,callback=function() edit_custom_mirror(plugin) end}
     rows[#rows+1]={text="说明",separator=true,enabled=false}
-    rows[#rows+1]={text="自动模式不测速、不记线路评分",post_text="GitHub → 镜像 1 → 镜像 2 → 镜像 3 → 自定义",enabled=false}
-    rows[#rows+1]={text="GitHub API 始终直连",post_text="镜像只负责已收录扩展的固定安装包",enabled=false}
+    rows[#rows+1]={text="GitHub 官方决定版本与安装包",post_text="下载通道只传输同一个正式 Release ZIP",enabled=false}
+    rows[#rows+1]={text="大文件自动探测线路",post_text="只探测前 3 条高价值线路；已有断点优先续传",enabled=false}
+    rows[#rows+1]={text="源码包不会自动兜底",post_text="正式安装包未完成时保留断点并稍后继续",enabled=false}
     return rows
 end
 
@@ -1047,23 +1136,66 @@ local function install_repo(plugin,repo,repo_info,release,forced_source)
         return
     end
     local source,source_error=Catalog.package_source(entry,compatibility.arch)
-    if not source then
-        plugin:info(source_error or "此扩展尚未收录确定的一键安装包。")
-        return
-    end
-    -- Resuming an existing task is allowed only when it still describes the
-    -- exact catalog artifact. A stale beta.10/source-discovery task can never
-    -- override the current deterministic catalog.
+    local pinned_source=source
     if type(forced_source)=="table" and trim(forced_source.url)~="" then
-        local same=tostring(forced_source.url)==tostring(source.url)
-            and tostring(forced_source.sha256 or ""):lower()==tostring(source.sha256 or ""):lower()
-            and (tonumber(forced_source.size) or 0)==(tonumber(source.size) or 0)
-            and tostring(forced_source.expected_dir or "")==tostring(source.expected_dir or "")
-        if not same then
-            plugin:info("旧下载任务与当前扩展目录不一致，已停止恢复。\n\n请删除旧下载数据后重新安装。")
+        local expected=tostring(forced_source.expected_dir or "")
+        local repo_dir=tostring(entry.install_dirname or repo:match("([^/]+)$") or "")
+        local url=tostring(forced_source.url or "")
+        local source_kind=tostring(forced_source.source or "")
+        local trusted_dynamic=(source_kind=="github-release-asset" or source_kind=="github-source-verified")
+            and url:find("github.com/"..repo.."/",1,true)~=nil
+            and expected==repo_dir and repo_dir:match("%.koplugin$")~=nil
+        if pinned_source then
+            local same=tostring(forced_source.url)==tostring(pinned_source.url)
+                and tostring(forced_source.sha256 or ""):lower()==tostring(pinned_source.sha256 or ""):lower()
+                and (tonumber(forced_source.size) or 0)==(tonumber(pinned_source.size) or 0)
+                and expected==tostring(pinned_source.expected_dir or "")
+            if not same then
+                plugin:info("旧下载任务与当前扩展目录不一致，已停止恢复。\n\n请删除旧下载数据后重新安装。")
+                return
+            end
+            source=pinned_source
+        elseif trusted_dynamic then
+            source=U.copy(forced_source)
+            source_error=nil
+        else
+            plugin:info("旧下载任务缺少可验证的正式安装包身份，已停止恢复。\n\n请从插件详情重新安装。")
+            return
+        end
+    else
+        local release_candidates
+        if not source and type(release)=="table" then
+            source,source_error,release_candidates=Catalog.release_package_source(entry,release,compatibility.arch)
+        end
+        if not source and type(release_candidates)=="table" and #release_candidates>1
+            and source_error=="最新 Release 有多个同等候选安装包，需要选择" then
+            local top_score=tonumber(release_candidates[1]._asset_score) or 0
+            local rows={}
+            for _,candidate in ipairs(release_candidates) do
+                if (tonumber(candidate._asset_score) or 0)~=top_score then break end
+                local chosen=U.copy(candidate); chosen._asset_score=nil
+                rows[#rows+1]={
+                    text=tostring(chosen.asset_name or "Release ZIP"),
+                    post_text=Compat.format_bytes(tonumber(chosen.size) or 0),
+                    callback=function() install_repo(plugin,repo,repo_info,release,chosen) end,
+                }
+            end
+            show_menu(plugin,"选择官方 Release 安装包",rows)
+            return
+        end
+        if not source then
+            local release_proved_absent=type(release)~="table" and type(repo_info)=="table" and repo_info.release_missing==true
+            local release_proved_unusable=type(release)=="table" and source_error=="最新 Release 没有可识别的插件 ZIP"
+            if release_proved_absent or release_proved_unusable then
+                source,source_error=Catalog.source_package_source(entry,repo_info,type(repo_info)=="table" and repo_info.source_probe or nil)
+            end
+        end
+        if not source then
+            plugin:info(source_error or "没有找到可确认的正式 Release 安装包。")
             return
         end
     end
+
 
     local installed=find_managed_by_repo(plugin,repo)
     if installed and installed.duplicate then
@@ -1093,8 +1225,10 @@ local function install_repo(plugin,repo,repo_info,release,forced_source)
     local spec={
         repo=repo,name=display_name,version=tostring(source.version or ""),url=tostring(source.url or ""),
         size=tonumber(source.size) or 0,sha256=tostring(source.sha256 or ""),deterministic=true,
+        allow_missing_sha=source.allow_missing_sha==true,
         asset_name=tostring(source.asset_name or ""),expected_dir=tostring(source.expected_dir or ""),
-        layout=tostring(source.layout or ""),source="catalog-package",channel="catalog",remote_ref=tostring(source.remote_ref or ""),
+        layout=tostring(source.layout or ""),source=tostring(source.source or "catalog-package"),
+        channel=tostring(source.channel or "github-release"),remote_ref=tostring(source.remote_ref or ""),
     }
 
     local started,start_error=task:start(spec,function(state)
@@ -1102,7 +1236,7 @@ local function install_repo(plugin,repo,repo_info,release,forced_source)
     end,function(value,worker_error,task_snapshot,worker_result)
         if worker_error or type(value)~="table" or not value.path then
             close_extension_progress(plugin,"failed")
-            local rows={"扩展下载失败。","","已按固定顺序尝试可用下载源。"}
+            local rows={"扩展下载失败。","","已尝试当前可用下载通道；正式安装包身份没有改变。"}
             local details=source_attempt_lines(worker_result)
             if #details>0 then
                 rows[#rows+1]=""
@@ -1186,6 +1320,7 @@ local function extension_task_label(task)
     local state=tostring(task.state or "")
     local labels={
         downloading="正在下载",waiting_network="等待网络",paused_user="已暂停",paused_power="设备休眠",
+        paused_priority="同步让路",
         interrupted="可继续",cancelled="已取消",downloaded="下载完成",verifying="正在校验",
         extracting="正在解压",installing="正在安装",completed="安装完成",failed="未完成",
     }
@@ -1241,7 +1376,7 @@ local function show_extension_task_detail(plugin,target)
                 source_probe={installable=nil},
             },nil,spec)
         end}}
-    elseif (state=="paused_user" or state=="paused_power" or state=="waiting_network"
+    elseif (state=="paused_user" or state=="paused_power" or state=="paused_priority" or state=="waiting_network"
         or state=="interrupted" or state=="cancelled" or state=="failed") then
         buttons[#buttons+1]={{text="继续下载",callback=function()
             UIManager:close(dialog)
@@ -1546,11 +1681,23 @@ local function repo_detail_rows(plugin,repo,info,release,fallback,stale)
         rows[#rows+1]={text="仓库状态",post_text=fallback.allow_archived_install==true and "已归档 · 仅使用已发布 Release" or "已归档",enabled=false}
     end
 
-    local catalog_source,catalog_source_error
+    local catalog_source,catalog_source_error,catalog_candidates
     if catalog_entry and (not compatibility or compatibility.installable==true) then
         catalog_source,catalog_source_error=Catalog.package_source(catalog_entry,compatibility and compatibility.arch or nil)
+        if not catalog_source and type(release)=="table" then
+            catalog_source,catalog_source_error,catalog_candidates=Catalog.release_package_source(catalog_entry,release,compatibility and compatibility.arch or nil)
+        end
+        if not catalog_source then
+            local release_proved_absent=type(release)~="table" and info.release_missing==true
+            local release_proved_unusable=type(release)=="table" and catalog_source_error=="最新 Release 没有可识别的插件 ZIP"
+            if release_proved_absent or release_proved_unusable then
+                catalog_source,catalog_source_error=Catalog.source_package_source(catalog_entry,info,info.source_probe)
+            end
+        end
     end
-    local auto_allowed=catalog_entry~=nil and catalog_source~=nil
+    local ambiguous_release=type(catalog_candidates)=="table" and #catalog_candidates>1
+        and catalog_source_error=="最新 Release 有多个同等候选安装包，需要选择"
+    local auto_allowed=catalog_entry~=nil and (catalog_source~=nil or ambiguous_release)
         and (info.archived~=true or fallback.allow_archived_install==true)
         and (not compatibility or compatibility.installable==true)
     local block_reason=compatibility and compatibility.block_reason or catalog_source_error or "未进入觅阅一键安装目录"
@@ -1637,6 +1784,8 @@ local function repo_detail(plugin,repo,fallback,force)
         if not info then return {info=nil,error=repo_error} end
         local release,release_error=latest_release(plugin,repo)
         release=compact_release(release)
+        info.release_missing=release_error=="no_release"
+        info.source_probe=maybe_probe_source(plugin,repo,info,release,release_error)
         return {
             info=info,release=release,release_error=release_error,
             release_missing=release_error=="no_release",
@@ -1654,6 +1803,7 @@ local function repo_detail(plugin,repo,fallback,force)
             plugin:info(message.."。")
             return
         end
+        info.release_missing=value.release_missing==true
         meta_cache_put(plugin,repo,info,value.release,value.release_missing==true)
         show_menu(plugin,"扩展 · "..display_repo_name(info,fallback),repo_detail_rows(plugin,repo,info,value.release,fallback,false))
     end,45)
@@ -1888,9 +2038,9 @@ local function center_about(plugin)
     plugin:info(
         "觅阅扩展中心 · "..tostring(Config.VERSION).."\n\n"
         .."“觅阅推荐”是面向中文 KOReader 用户的人工精选；“社区热门”和“搜索扩展”仍直接使用 GitHub 社区结果，不会因为觅阅没有推荐某个项目而把它隐藏。\n\n"
-        .."一键安装只使用觅阅目录中已经固定版本、下载地址、大小、SHA-256 和目标目录的安装包。自动模式按 GitHub → 备用源的固定顺序逐个尝试；某个来源超时、截断或校验失败会继续下一来源，不做测速或历史线路评分。\n\n"
-        .."文件只有在大小与 SHA-256 完全一致后才进入安装；ZIP 由 KOReader 自己的 Archiver 读取，随后在临时目录检查路径、插件结构、体积、剩余空间和 CPU/ELF 兼容性。更新使用临时切换与恢复记录，失败或异常中断会优先保住旧插件。\n\n"
-        .."卡欧市场等没有可持续验证公开官方仓库的项目只提供介绍，不猜测下载地址。第三方扩展由其作者维护，安装、更新或卸载后请完整重启 KOReader。"
+        .."GitHub 官方 Release 决定版本和正式安装包；觅阅目录中已固定的包直接使用目录记录，未固定但已收录的仓库会读取官方 Release。GitHub 中文社区是自动模式的首选下载通道，GitHub 官方与现有代理作为后备；所有通道只传输同一个正式 ZIP。大文件会做有界线路探测，并优先继续已有断点。\n\n"
+        .."下载慢不会因为短时间低速被判失败；大文件使用可恢复下载，网络中断后保留进度。文件完成后先核对官方大小与 SHA-256（可用时），再交给 KOReader Archiver 检查 ZIP、路径、插件结构、体积、剩余空间和 CPU/ELF 兼容性。源码 ZIP 只有在官方 Release 确认没有可用安装包且 GitHub Contents API 已证明源码本身是完整插件时才允许使用。\n\n"
+        .."安装使用临时切换与恢复记录，失败或异常中断会优先保住旧插件；阅读进度、阅读结束和批注等关键云端写入会临时让后台书籍/插件下载让路，完成后继续断点。第三方扩展由其作者维护，安装、更新或卸载后请完整重启 KOReader。"
     )
 end
 
@@ -2090,17 +2240,42 @@ local function install_managed_repo(plugin,item,mode)
     if not item or not valid_repo(item.repo) or item.duplicate then return end
     local entry=known_repo(item.repo)
     local compatibility=entry and Compat.evaluate(entry,plugin) or nil
-    local source,source_error=entry and Catalog.package_source(entry,compatibility and compatibility.arch or nil) or nil
-    if not source then plugin:info(source_error or "此扩展尚未进入觅阅一键安装目录。") return end
+    local pinned_source,source_error=entry and Catalog.package_source(entry,compatibility and compatibility.arch or nil) or nil
+    if not entry then plugin:info("此扩展尚未进入觅阅一键安装目录。"); return end
     local is_update=mode=="update"
     local verb=is_update and "更新" or "重新安装"
-    local note=is_update and "新包会先完成下载、SHA 校验与临时解压，确认可用后才切换旧插件。"
+    local note=is_update and "新包会先完整下载并校验，确认可用后才切换旧插件。"
         or "重新安装会先准备完整新插件，失败时保留当前可用版本。"
     UIManager:show(ConfirmBox:new{
         text=verb.."“"..tostring(item.name or item.dir).."”？\n\n"..note,
         ok_text=verb,cancel_text="取消",
         ok_callback=function()
-            install_repo(plugin,item.repo,{name=tostring(entry.name or item.name or item.repo),archived=false},nil)
+            if pinned_source then
+                install_repo(plugin,item.repo,{name=tostring(entry.name or item.name or item.repo),archived=false},nil)
+                return
+            end
+            -- For source-capable entries, never assume that a missing Release
+            -- object means “there is no Release”. Re-read GitHub first. Source
+            -- archives are allowed only after GitHub proves there is no usable
+            -- Release asset.
+            run_async_with_progress(plugin,"正在确认正式安装包……","extension_resolve_install",function()
+                local info,repo_error=github_repo(plugin,item.repo)
+                info=compact_repo_info(info)
+                if not info then return {info=nil,error=repo_error} end
+                local release,release_error=latest_release(plugin,item.repo)
+                release=compact_release(release)
+                info.release_missing=release_error=="no_release"
+                info.source_probe=maybe_probe_source(plugin,item.repo,info,release,release_error)
+                return {info=info,release=release,error=release_error}
+            end,function(value,worker_error)
+                local info=type(value)=="table" and value.info or nil
+                if not info then
+                    local _,message=classify_github_error(worker_error or (type(value)=="table" and value.error or nil))
+                    plugin:info(message.."。\n\n没有改用源码包，以免把网络失败误判成无 Release。")
+                    return
+                end
+                install_repo(plugin,item.repo,info,value.release)
+            end,45)
         end,
     })
 end

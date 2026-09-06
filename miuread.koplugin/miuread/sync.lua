@@ -2852,56 +2852,114 @@ end
 
 function Sync:begin_progress_write(reason, callback)
     callback=type(callback)=="function" and callback or function() end
-    local daemon=self.daemon
-    if not daemon or daemon.active~=true or not daemon.paths then
-        callback(true,{state="no_active_time_writer"})
-        return true
-    end
+    reason=tostring(reason or "progress_write")
     if self.progress_write_fence==true then
         callback(false,{state="progress_fence_busy"})
         return false
     end
-    local seq=self:_next_writer_barrier(reason or "progress_write_fence")
-    if not seq then callback(true,{state="no_barrier"}); return true end
-    self.progress_write_fence=true
-    self.progress_write_fence_seq=seq
-    self:_write_daemon_control(true,true,{
-        progress_fence=true,writer_barrier_seq=seq,
-        writer_barrier_reason=tostring(reason or "progress_write_fence"),
-    })
-    local waiting=true
-    local notice_task
-    notice_task=function()
-        if not waiting or self.progress_write_fence_seq~=seq then return end
-        logger.info("[MiuRead][ProgressWriter] queued behind in-flight reading-time request",
-            "seq=",tostring(seq),"reason=",tostring(reason or "progress_write_fence"),
-            "policy=soft_preempt_no_replay")
+
+    -- Cloud progress writes outrank long-running download transports. Pause
+    -- them first, then wait briefly for the book worker to acknowledge its
+    -- checkpoint. Extension curl workers are stopped synchronously by pause().
+    local priority_started=false
+    if self.host and type(self.host._critical_transfer_begin)=="function" then
+        local ok,value=pcall(self.host._critical_transfer_begin,self.host,"progress_write")
+        priority_started=ok and value~=false
     end
-    UIManager:scheduleIn(math.max(1,tonumber(Config.PROGRESS_WRITER_SOFT_NOTICE_SECONDS) or 4),notice_task)
-    self:wait_writer_barrier(seq,function(ok,result)
-        waiting=false
-        if notice_task then UIManager:unschedule(notice_task); notice_task=nil end
-        if not ok then
-            self.progress_write_fence=false
-            self.progress_write_fence_seq=0
-            self:_write_daemon_control(true,true,{progress_fence=false})
+    self.progress_transfer_priority=priority_started==true
+
+    local function release_priority(why)
+        if self.progress_transfer_priority==true then
+            self.progress_transfer_priority=false
+            if self.host and type(self.host._critical_transfer_end)=="function" then
+                pcall(self.host._critical_transfer_end,self.host,tostring(why or "progress_write_complete"))
+            end
         end
-        callback(ok,result)
-    end,math.max(4,tonumber(Config.PROGRESS_WRITER_MAX_WAIT_SECONDS) or 8))
+    end
+
+    local function continue_after_download_yield()
+        local daemon=self.daemon
+        if not daemon or daemon.active~=true or not daemon.paths then
+            callback(true,{state="no_active_time_writer"})
+            return
+        end
+        local seq=self:_next_writer_barrier(reason or "progress_write_fence")
+        if not seq then callback(true,{state="no_barrier"}); return end
+        self.progress_write_fence=true
+        self.progress_write_fence_seq=seq
+        self:_write_daemon_control(true,true,{
+            progress_fence=true,writer_barrier_seq=seq,
+            writer_barrier_reason=reason,
+        })
+        local waiting=true
+        local notice_task
+        notice_task=function()
+            if not waiting or self.progress_write_fence_seq~=seq then return end
+            logger.info("[MiuRead][ProgressWriter] queued behind in-flight reading-time request",
+                "seq=",tostring(seq),"reason=",reason,
+                "policy=soft_preempt_no_replay")
+        end
+        UIManager:scheduleIn(math.max(1,tonumber(Config.PROGRESS_WRITER_SOFT_NOTICE_SECONDS) or 4),notice_task)
+        self:wait_writer_barrier(seq,function(ok,result)
+            waiting=false
+            if notice_task then UIManager:unschedule(notice_task); notice_task=nil end
+            if not ok then
+                self.progress_write_fence=false
+                self.progress_write_fence_seq=0
+                self:_write_daemon_control(true,true,{progress_fence=false})
+                release_priority("progress_barrier_failed")
+            end
+            callback(ok,result)
+        end,math.max(4,tonumber(Config.PROGRESS_WRITER_MAX_WAIT_SECONDS) or 8))
+    end
+
+    local started_clock=os.time()
+    local function transport_ready()
+        local ready=true
+        if self.host and type(self.host._critical_transfer_ready)=="function" then
+            local ok,value=pcall(self.host._critical_transfer_ready,self.host)
+            ready=not ok or value==true
+        end
+        if ready then
+            continue_after_download_yield()
+            return
+        end
+        -- Never let a slow worker acknowledgement block a critical write for a
+        -- long time. The pause marker stays in place, so the worker will yield
+        -- at its next safe checkpoint even if this short gate expires.
+        local elapsed=os.time()-started_clock
+        if elapsed>=3 then
+            logger.warn("[MiuRead][NetworkPriority] download pause acknowledgement timed out",
+                "reason=",reason,"elapsed=",tostring(elapsed))
+            continue_after_download_yield()
+            return
+        end
+        UIManager:scheduleIn(.12,transport_ready)
+    end
+    transport_ready()
     return true
 end
 
 function Sync:end_progress_write(reason)
-    if self.progress_write_fence~=true then return false end
-    self.progress_write_fence=false
-    self.progress_write_fence_seq=0
-    if self.daemon and self.daemon.active==true then
-        self:_write_daemon_control(true,true,{
-            progress_fence=false,writer_barrier_reason=tostring(reason or "progress_write_complete"),
-        })
+    local had_fence=self.progress_write_fence==true
+    if had_fence then
+        self.progress_write_fence=false
+        self.progress_write_fence_seq=0
+        if self.daemon and self.daemon.active==true then
+            self:_write_daemon_control(true,true,{
+                progress_fence=false,writer_barrier_reason=tostring(reason or "progress_write_complete"),
+            })
+        end
+        logger.info("[MiuRead][ProgressWriter] fence released","reason=",tostring(reason or "complete"))
     end
-    logger.info("[MiuRead][ProgressWriter] fence released","reason=",tostring(reason or "complete"))
-    return true
+    local had_priority=self.progress_transfer_priority==true
+    if had_priority then
+        self.progress_transfer_priority=false
+        if self.host and type(self.host._critical_transfer_end)=="function" then
+            pcall(self.host._critical_transfer_end,self.host,"progress_write")
+        end
+    end
+    return had_fence or had_priority
 end
 
 function Sync:upload_progress(callback, options)

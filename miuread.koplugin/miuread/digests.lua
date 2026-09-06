@@ -66,4 +66,65 @@ function D.sha256(input)
     end
     local out={}; for i=1,8 do out[i]=behex(h[i]) end; return table.concat(out)
 end
+
+
+-- Streaming SHA-256 for large downloaded assets. This keeps memory bounded on
+-- e-ink devices when sha256sum/openssl are unavailable; only a small tail plus
+-- one 64-byte schedule is resident at a time.
+local function sha256_block(h,s,pos)
+    local w={}
+    for j=0,15 do w[j]=be32(s,pos+j*4) end
+    for j=16,63 do
+        local x=bxor(ror(w[j-15],7),ror(w[j-15],18),rshift(w[j-15],3))
+        local y=bxor(ror(w[j-2],17),ror(w[j-2],19),rshift(w[j-2],10))
+        w[j]=plus(w[j-16],x,w[j-7],y)
+    end
+    local a,b,c,d,e,f,g,q=h[1],h[2],h[3],h[4],h[5],h[6],h[7],h[8]
+    for j=0,63 do
+        local s1=bxor(ror(e,6),ror(e,11),ror(e,25)); local ch=bxor(band(e,f),band(bnot(e),g))
+        local t1=plus(q,s1,ch,H[j+1],w[j]); local s0=bxor(ror(a,2),ror(a,13),ror(a,22))
+        local maj=bxor(band(a,b),band(a,c),band(b,c)); local t2=plus(s0,maj)
+        q,g,f,e,d,c,b,a=g,f,e,plus(d,t1),c,b,a,plus(t1,t2)
+    end
+    h[1],h[2],h[3],h[4]=plus(h[1],a),plus(h[2],b),plus(h[3],c),plus(h[4],d)
+    h[5],h[6],h[7],h[8]=plus(h[5],e),plus(h[6],f),plus(h[7],g),plus(h[8],q)
+end
+
+local function u64be_bytes(bit_length)
+    local hi=math.floor(bit_length/4294967296)
+    local lo=bit_length-hi*4294967296
+    local function bytes32(v)
+        local b1=math.floor(v/16777216)%256
+        local b2=math.floor(v/65536)%256
+        local b3=math.floor(v/256)%256
+        local b4=math.floor(v)%256
+        return string.char(b1,b2,b3,b4)
+    end
+    return bytes32(hi)..bytes32(lo)
+end
+
+function D.sha256_file(path,chunk_size)
+    local f,err=io.open(tostring(path or ""),"rb")
+    if not f then return nil,err or "open failed" end
+    chunk_size=math.max(4096,tonumber(chunk_size) or 256*1024)
+    local h={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19}
+    local tail,total="",0
+    while true do
+        local chunk=f:read(chunk_size)
+        if not chunk or chunk=="" then break end
+        total=total+#chunk
+        local data=tail..chunk
+        local full=#data-(#data%64)
+        for pos=1,full,64 do sha256_block(h,data,pos) end
+        tail=data:sub(full+1)
+    end
+    f:close()
+    local bit_length=total*8
+    local pad=(56-(#tail+1)%64)%64
+    local final=tail..string.char(128)..string.rep("\0",pad)..u64be_bytes(bit_length)
+    for pos=1,#final,64 do sha256_block(h,final,pos) end
+    local out={}; for i=1,8 do out[i]=behex(h[i]) end
+    return table.concat(out)
+end
+
 return D
