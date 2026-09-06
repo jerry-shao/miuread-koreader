@@ -777,6 +777,24 @@ function Store:migrate()
             logger.info("[MiuRead][Migration] schema 127 -> 128 done",
                 "extension_installer=v2","download_state=repairable")
         end
+        if schema<129 then
+            -- Package Manager v3 deliberately does not adopt v2 transfer
+            -- residues from miuread/temp. V3 tasks live in extensions/tasks
+            -- with an owner/session descriptor, so only those are resumable.
+            -- Preserve the user's selected source/custom prefix, but reset old
+            -- success/failure-only route scores because v3 also records actual
+            -- transfer speed, TTFB and Range support.
+            local network=self.db:readSetting("extension_center_network_v2",{}) or {}
+            if type(network)~="table" then network={} end
+            network.mode=tostring(network.mode or "auto")
+            network.custom_prefix=tostring(network.custom_prefix or "")
+            network.health={}
+            self.db:saveSetting("extension_center_network_v2",network)
+            self.db:saveSetting("extension_package_manager_version",3)
+            self.db:saveSetting("extension_transfer_legacy_v2","ignored_not_resumed")
+            logger.info("[MiuRead][Migration] schema 128 -> 129 done",
+                "extension_package_manager=v3","legacy_v2_partials=ignored","route_health=reset")
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
     end

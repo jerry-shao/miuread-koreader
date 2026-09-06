@@ -901,30 +901,34 @@ function Http:download_to_file(url,path,opt)
     request_opt.method=request_opt.method or "GET"
     request_opt.sink_path=path
     if request_opt.retries==nil then request_opt.retries=3 end
+    -- Extension package transfers may intentionally preserve an interrupted
+    -- sink so the recovery layer can resume it with Range. Existing callers
+    -- keep the historical delete-on-error behaviour unless they opt in.
+    local preserve_partial=request_opt.preserve_partial==true
     os.remove(path)
     local called,preview,code,headers,final=pcall(self.request,self,request_opt)
     if not called then
-        os.remove(path)
+        if not preserve_partial then os.remove(path) end
         error(preview)
     end
     if not code or code<200 or code>=300 then
-        os.remove(path)
+        if not preserve_partial then os.remove(path) end
         error("download HTTP "..tostring(code))
     end
     local size=Util.file_size(path)
     if not size or size<=0 then
-        os.remove(path)
+        if not preserve_partial then os.remove(path) end
         error("download returned empty content")
     end
     local expected=tonumber(hget(headers,"content-length") or "")
     if expected and expected>=0 and size~=expected then
-        os.remove(path)
+        if not preserve_partial then os.remove(path) end
         local attempt=math.max(1,tonumber(request_opt._integrity_attempt) or 1)
         local maximum=math.max(1,tonumber(request_opt.integrity_attempts) or 2)
         logger.warn("[MiuRead][HTTP] streamed download length mismatch",
             "url=",Util.redact_url(url),"expected=",tostring(expected),"received=",tostring(size),
             "attempt=",tostring(attempt),"maximum=",tostring(maximum))
-        if attempt<maximum then
+        if attempt<maximum and not preserve_partial then
             request_opt._integrity_attempt=attempt+1
             return self:download_to_file(url,path,request_opt)
         end

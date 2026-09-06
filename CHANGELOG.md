@@ -1,3 +1,19 @@
+## 5.8.0-beta.10
+
+- 扩展中心升级为 Package Manager v3：推荐插件支持确定性 Package Catalog，安装包 URL、版本、大小、SHA-256 与目标目录可直接由目录声明；Pinyin IME、番茄小说、Z-Library 和墨痕壁纸已使用固定 Release 包，正常安装不再先扫描源码或连续猜候选。
+- GitHub 社区继续保持开放发现；当同一仓库存在多个可安装候选时改为由用户明确选择，不再在后台静默连续尝试 Release/Tag/Branch 源码包。
+- 插件正常下载恢复 5.8 beta.4 的可靠 fast path：优先使用 KOReader 自身流式 HTTP 下载；只有中断/异常后才进入 curl 断点恢复层。自动模式最多尝试 3 条有价值线路，手动选择 GitHub/镜像时严格使用所选线路。
+- 新增持久化 ExtensionTask：每个插件任务拥有独立 `miuread/extensions/tasks/<task-id>/` 工作目录、task/owner/progress/result 状态；同一时刻只允许一个插件传输 owner，启动时会收口旧会话遗留 transport，并保留可恢复下载数据。
+- 断点续传重新实现：Range 被拒绝、镜像不支持续传或 ZIP 尚未完整时均不会直接删除 canonical partial；需要从 0 重试时使用独立 scratch 文件，只有完整下载成功后才晋升为 package.zip。
+- 插件下载正式接入下载中心，增加“全部 / 书籍 / 插件”筛选；插件使用与图书一致的 ProgressWidget 显示真实字节百分比、已下载/总大小、平滑速度、ETA、下载源以及等待网络/校验/解压/安装阶段。
+- 取消插件下载默认保留断点；支持暂停、继续、取消并保留、删除下载数据。KOReader 重启后的 interrupted/downloaded 任务可以从下载中心重新进入完整 Package Pipeline，继续完成下载、校验和安装。
+- 插件传输接入 Kindle ScreenSaver Hold：真实插件下载会注册 `extension_download` 后台任务；无法保持后台时进入 `paused_power` 并保存断点。唤醒后不会立刻联网，而是在 Wi-Fi 恢复并稳定后再继续。
+- DNS/无网络错误改为 `WAIT_NETWORK`，不再把整机离线误判成单个 GitHub/镜像故障并连续轰炸多个代理；自动线路健康记录增加真实平均速度、TTFB 与 Range 支持，用实际历史传输表现排序，不做额外测速赛马。
+- 下载完成后增加 expected size、SHA-256、ZIP 文件头与中心目录校验，再进入现有安全安装链；继续保留路径穿越/符号链接/体积/架构检查、staging、旧插件备份、安装后完整性验证与失败回滚。
+- 安装/替换阶段增加独立 `extension_install` 短时 finish lease；KOReader 退出/重启会先 quiesce 插件 transport，避免只结束父 worker 而留下 curl 子进程。
+- Schema 升至 129。旧 v2 `miuread/temp` 下载残留不会被 v3 自动认领，避免污染新的任务状态；保留用户下载源选择与自定义镜像，但重置旧的成功/失败线路分数，改由 v3 重新学习真实速度。
+- 本版不改图书 DownloadTask、章节抓取/EPUB 生成、Reader 生命周期、同步/批注协议或 OTA 安装核心。
+
 ## 5.8.0-beta.9
 
 - 下滑控制中心恢复紧凑单行布局：候选功能池继续完整保留，但实际最多显示 8 个已选择且当前设备支持的快捷项；3/5/7/8 项都会按可用宽度精确等分铺满，不再出现 6+1 的孤立第二行。

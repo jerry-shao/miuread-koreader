@@ -67,6 +67,17 @@ M.ENTRIES = {
         recommendation = "中文网络小说",
         dependencies = { "书源账号或 Cookie（按所选书源）" },
         network_required = true,
+        package = {
+            type = "release_asset",
+            version = "v2.2.1",
+            artifact = {
+                name = "fanqie.koplugin.zip",
+                url = "https://github.com/hesan1232/fanqie.koplugin/releases/download/v2.2.1/fanqie.koplugin.zip",
+                size = 126623,
+                sha256 = "21b368198b26c2f0f874f413c001f87c94af82a2292046620fcb2207c16de86b",
+            },
+            install = { dirname = "fanqie.koplugin", layout = "name-koplugin" },
+        },
         install_strategy = "standard",
     },
     {
@@ -101,6 +112,17 @@ M.ENTRIES = {
         recommendation = "图书搜索与下载",
         dependencies = { "Z-Library 账号" },
         network_required = true,
+        package = {
+            type = "release_asset",
+            version = "v1.0.49-e3c07c1014e2a50b0cfae757c476c16cb38efec1",
+            artifact = {
+                name = "zlibrary_plugin_v1.0.49.zip",
+                url = "https://github.com/ZlibraryKO/zlibrary.koplugin/releases/download/v1.0.49-e3c07c1014e2a50b0cfae757c476c16cb38efec1/zlibrary_plugin_v1.0.49.zip",
+                size = 445092,
+                sha256 = "455423604c7c5eab20fa00f9ac31c89514202892b34347c45fc34435e1252553",
+            },
+            install = { dirname = "zlibrary.koplugin", layout = "name-koplugin" },
+        },
         install_strategy = "standard",
     },
     {
@@ -136,6 +158,17 @@ M.ENTRIES = {
         platforms = { "kindle", "kobo", "android", "desktop", "other" },
         tested_platforms = { "Kindle Paperwhite 4" },
         network_required = false,
+        package = {
+            type = "release_asset",
+            version = "v3.5.7",
+            artifact = {
+                name = "inkstain.koplugin-v3.5.7.zip",
+                url = "https://github.com/miumiupy98-art/inkstain.koplugin/releases/download/v3.5.7/inkstain.koplugin-v3.5.7.zip",
+                size = 9983676,
+                sha256 = "87da12b78dd941f424c617fc10fdb620ca239b60fc9b61b39089f4c4717e0bee",
+            },
+            install = { dirname = "inkstain.koplugin", layout = "name-koplugin" },
+        },
         install_strategy = "standard",
         warning = "当前作者仅在 Kindle Paperwhite 4 上完成真机测试；其他设备首次启用前建议备份 KOReader 屏保与设置。",
     },
@@ -187,6 +220,21 @@ M.ENTRIES = {
         package_note = "解压后约 170 MiB",
         required_free_bytes = 220 * 1024 * 1024,
         max_plugin_bytes = 256 * 1024 * 1024,
+        -- Curated packages are resolved before any GitHub probing. Pinyin IME
+        -- is intentionally pinned because its repository source archive is not
+        -- an installable KOReader plugin; only the Release asset is valid.
+        package = {
+            type = "release_asset",
+            version = "v1.2.0",
+            artifact = {
+                name = "pinyinime.koplugin-v1.2.0.zip",
+                url = "https://github.com/Merpyzf/pinyinime.koplugin/releases/download/v1.2.0/pinyinime.koplugin-v1.2.0.zip",
+                size = 63312207,
+                sha256 = "14047ed2638c32637c1dbc831f676967a221548f435443815b1c223881f4bbcb",
+            },
+            install = { dirname = "pinyinime.koplugin", layout = "name-koplugin" },
+            compatibility = { min_koreader = "2025.10" },
+        },
         install_strategy = "standard",
     },
     {

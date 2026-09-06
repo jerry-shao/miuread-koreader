@@ -51,6 +51,7 @@ local AnnotationSync=require("miuread.annotation_sync")
 local Downloader=require("miuread.downloader")
 local DownloadProgress=require("miuread.download_progress")
 local DownloadTask=require("miuread.download_task")
+local ExtensionTask=require("miuread.extension_task")
 local DownloadResult=require("miuread.download_result")
 local BookIntegrity=require("miuread.book_integrity")
 local EpubInstaller=require("miuread.epub_installer")
@@ -862,6 +863,14 @@ function Plugin:init()
     end
     self.downloader=Downloader:new(self.reader,self.api,self.annotations,self.store,self.http)
     self.download_task=DownloadTask:new(self.store)
+    -- Extension transfers outlive a single FileManager/Reader plugin instance.
+    -- Share one manager across the current KOReader process so opening a book
+    -- cannot create a second startup reaper and mistake the live worker for an
+    -- orphan. A real KOReader restart rebuilds HOME_SESSION and reaps v3 state.
+    if not HOME_SESSION.extension_task_manager then
+        HOME_SESSION.extension_task_manager=ExtensionTask:new(self.store)
+    end
+    self.extension_task=HOME_SESSION.extension_task_manager
     self.cache_cleanup_task=CacheCleanupTask:new(self.store)
     self.library=Library:new(self.api,self.http,self.store)
     local cover_quality_version=tonumber(self.store:get("cover_quality_version",0)) or 0
@@ -11683,10 +11692,16 @@ function Plugin:_sleep_action_detail()
         local ok,value=pcall(self.download_task.can_continue_locked,self.download_task)
         download=ok and value==true
     end
+    local extension_download=false
+    if self.extension_task and type(self.extension_task.can_continue_locked)=="function" then
+        local ok,value=pcall(self.extension_task.can_continue_locked,self.extension_task)
+        extension_download=ok and value==true
+    end
+    local transfer=download or extension_download
     local reading=self.ui and self.ui.document and self.sync and self.sync.reading_end_finalized~=true
     local suspend_background_supported=PseudoLockscreen.background_supported()==true
-    if download and reading then return "锁屏后同步并继续下载" end
-    if download then return "锁屏后继续下载" end
+    if transfer and reading then return "锁屏后同步并继续下载" end
+    if transfer then return "锁屏后继续下载" end
     if reading and suspend_background_supported then return "锁屏后完成阅读同步" end
     if reading then return "保存阅读状态后休眠" end
     return "立即休眠"
@@ -11712,7 +11727,8 @@ end
 
 function Plugin:_home_device_power_busy(action_label)
     action_label=tostring(action_label or "执行此操作")
-    if (self.download_task and self.download_task:busy()) or self._download_runtime~=nil then
+    if (self.download_task and self.download_task:busy()) or self._download_runtime~=nil
+        or (self.extension_task and self.extension_task:running()) then
         self:info("当前下载任务尚未完成，暂不"..action_label.."。\n\n请等待任务结束，或先在下载管理中取消任务。")
         return true
     end
@@ -19996,6 +20012,9 @@ local function is_download_temp_name(name)
         or name:match("^download%-pause%-.+%.json$")
         or name:match("^download%-cancel%-.+")
         or name:match("^extension%-.+%.zip$")
+        or name:match("^extension%-.+%.zip%.part$")
+        or name:match("^extension%-.+%.curl%.status$")
+        or name:match("^extension%-.+%.curl%.error$")
         or name:match("^extension%-json%-.+%.json$")
         or name:match("^extension%-stage%-.+")
 end
@@ -20055,6 +20074,11 @@ function Plugin:_storage_categories()
     if self.store.prefetch_dir then
         for _,path in ipairs(U.list(self.store.prefetch_dir)) do categories.temp[#categories.temp+1]=path end
     end
+    -- Package Manager v3 keeps resumable plugin tasks outside shared temp.
+    -- Count them as download-resume storage, but never include them in generic
+    -- cleanup; deletion is explicit from the plugin task detail.
+    local extension_tasks=tostring(self.store.data_dir or "").."/extensions/tasks"
+    for _,path in ipairs(U.list(extension_tasks)) do categories.partial[#categories.partial+1]=path end
     return categories
 end
 function Plugin:_run_cache_cleanup(paths,options)
@@ -20691,18 +20715,57 @@ function Plugin:show_downloads(back_callback)
         self._downloads_menu=nil
     end
     local items={}
-    if self:_has_download_status() then items[#items+1]={text=self:_download_status_label(),callback=function() self:show_download_status() end} end
-    items[#items+1]={text="下载设置",post_text="策略 目录与提醒",sub_item_table_func=function() return self:download_settings_menu() end}
-    local queue=self.store:download_queue()
-    items[#items+1]={text="等待下载",post_text=tostring(#queue).." 项",callback=function() self:show_waiting_downloads() end}
+    local filter=tostring(self._download_center_filter or "all")
+    if filter~="all" and filter~="book" and filter~="extension" then filter="all" end
+    local filter_labels={all="全部",book="书籍",extension="插件"}
+    items[#items+1]={
+        text="筛选",post_text=filter_labels[filter] or "全部",
+        sub_item_table_func=function()
+            local function row(key,label)
+                return {text=label,post_text=self._download_center_filter==key and "当前" or "",callback=function()
+                    self._download_center_filter=key
+                    UIManager:nextTick(function() self:show_downloads(back_callback) end)
+                end}
+            end
+            return {row("all","全部"),row("book","书籍"),row("extension","插件")}
+        end,
+    }
+
+    if filter~="extension" then
+        items[#items+1]={text="书籍下载",enabled=false}
+        if self:_has_download_status() then items[#items+1]={text=self:_download_status_label(),callback=function() self:show_download_status() end} end
+        items[#items+1]={text="下载设置",post_text="策略 目录与提醒",sub_item_table_func=function() return self:download_settings_menu() end}
+        local queue=self.store:download_queue()
+        items[#items+1]={text="等待下载",post_text=tostring(#queue).." 项",callback=function() self:show_waiting_downloads() end}
+    end
+
+    if filter~="book" then
+        local ok_center,ExtensionCenter=pcall(require,"miuread.extension_center")
+        local extension_rows={}
+        if ok_center and ExtensionCenter and type(ExtensionCenter.download_rows)=="function" then
+            local ok_rows,value=pcall(ExtensionCenter.download_rows,self)
+            if ok_rows and type(value)=="table" then extension_rows=value end
+        end
+        items[#items+1]={text="插件下载",enabled=false}
+        if #extension_rows==0 then
+            items[#items+1]={text="暂无插件下载任务",post_text="从插件市场安装后会显示在这里",enabled=false}
+        else
+            for _,row in ipairs(extension_rows) do items[#items+1]=row end
+        end
+    end
+
+    items[#items+1]={text="存储",separator=true,enabled=false}
     items[#items+1]={text="存储占用",callback=function() self:show_storage_usage() end}
     items[#items+1]={text="存储与清理",callback=function() self:show_download_cleanup_dialog() end}
-    items[#items+1]={text="已完成",enabled=false}
-    for _,b in ipairs(self.store:all_books()) do
-        local labels=self:_download_book_labels(b)
-        if #labels>0 then
-            local book_id=tostring(b.book_id)
-            items[#items+1]={text=b.title or book_id,post_text=table.concat(labels," · "),callback=function() self:downloaded_book_menu(book_id) end}
+
+    if filter~="extension" then
+        items[#items+1]={text="已完成书籍",enabled=false}
+        for _,b in ipairs(self.store:all_books()) do
+            local labels=self:_download_book_labels(b)
+            if #labels>0 then
+                local book_id=tostring(b.book_id)
+                items[#items+1]={text=b.title or book_id,post_text=table.concat(labels," · "),callback=function() self:downloaded_book_menu(book_id) end}
+            end
         end
     end
     if HomeView.is_shown() and not self:_active_reader_ui() then
@@ -27236,15 +27299,24 @@ function Plugin:_quiesce_reader_background_for_exit(reason)
     if self.sync and type(self.sync.quiesce_for_exit)=="function" then
         pcall(self.sync.quiesce_for_exit,self.sync,reason)
     end
+    -- ExtensionTask owns its curl child explicitly. Quiesce it before clearing
+    -- device-level holds so a KOReader restart cannot leave an orphan transport.
+    if self.extension_task and type(self.extension_task.quiesce_for_exit)=="function" then
+        local ok,err=pcall(self.extension_task.quiesce_for_exit,self.extension_task,reason)
+        if not ok then logger.warn("[MiuRead][ExtensionTask] exit quiesce failed",tostring(err)) end
+    end
     local snapshot=PseudoLockscreen.snapshot() or {}
     local tasks=type(snapshot.tasks)=="table" and snapshot.tasks or {}
-    -- Never tear down a genuine download hold here. The quit path hibernates
-    -- downloads before reaching this function; external restarts may still have
-    -- a live download and must keep its own marker isolated from finalizer work.
-    if tasks.download~=true then pcall(PseudoLockscreen.force_clear,"exit:"..reason) end
+    -- Never tear down a genuine background owner. Book downloads keep their
+    -- validated path; extension download/install owners are independent.
+    if tasks.download~=true and tasks.extension_download~=true and tasks.extension_install~=true then
+        pcall(PseudoLockscreen.force_clear,"exit:"..reason)
+    end
     logger.info("[MiuRead][Power] reader background quiesced for exit",
         "reason=",reason,
-        "download=",tostring(tasks.download==true))
+        "download=",tostring(tasks.download==true),
+        "extension_download=",tostring(tasks.extension_download==true),
+        "extension_install=",tostring(tasks.extension_install==true))
     return true
 end
 
@@ -27285,26 +27357,26 @@ function Plugin:_finish_suspend_reader_finalizer(ok,generation,stage)
             download_reason="check_failed"
         end
     end
+    local extension_continue,extension_reason=self:_extension_download_continue_locked()
     local hold_active=PseudoLockscreen.active()==true
     local hold_platform=PseudoLockscreen.device_platform()
     local hold_state=hold_platform=="kindle" and "SCREEN_SAVER_HOLD" or "PSEUDO_LOCKED"
+    local transfer_continue=download_continue or extension_continue
     local target
     if hold_platform=="kindle" then
-        -- Finalizer ownership ends in this function. A Kindle hold that has no
-        -- real download left must therefore converge to native suspend intent,
-        -- even though powerd may remain visually in screenSaver until its next
-        -- readyToSuspend edge.
-        target=download_continue
+        -- Finalizer ownership ends in this function. Keep the screenSaver hold
+        -- only while a real book or extension transfer still owns it.
+        target=transfer_continue
             and (hold_active and hold_state or "DOWNLOAD_LOCKED")
             or "REAL_SUSPEND"
     else
-        -- Keep Kobo's validated legacy pseudo-lock transition unchanged.
+        -- Keep Kobo's validated legacy book-download pseudo-lock transition.
         target=hold_active and hold_state
             or (download_continue and "DOWNLOAD_LOCKED" or "REAL_SUSPEND")
     end
     local power=PowerState.transition(target,"reading_end_complete",{
         download_active=self.download_task and self.download_task:busy() or false,
-        download_continue=download_continue,sync_continue=false,
+        download_continue=download_continue,extension_continue=extension_continue,sync_continue=false,
     })
     self._power_suspend_generation=power.generation
     -- Download and reader_finalizer leases coexist in beta.12. If a download
@@ -27312,11 +27384,17 @@ function Plugin:_finish_suspend_reader_finalizer(ok,generation,stage)
     -- needed when final progress/time work ends.
     if self.download_task then
         -- Reader finalization may still own the device-level screen-saver hold,
-        -- but the download lane only receives a locked state for a real task.
+        -- but the book lane only receives a locked state for a real book task.
         local download_target=(not self:_passive_prefetch_active() and download_continue)
             and (hold_active and hold_state or "DOWNLOAD_LOCKED")
             or "REAL_SUSPEND"
         self.download_task:on_suspend(download_target,power.generation)
+    end
+    if self.extension_task and type(self.extension_task.on_suspend)=="function" then
+        local extension_target=extension_continue
+            and (hold_active and hold_state or "DOWNLOAD_LOCKED")
+            or "REAL_SUSPEND"
+        pcall(self.extension_task.on_suspend,self.extension_task,extension_target,power.generation)
     end
     self._reading_end_standby_held=false
     SuspendWorkLease.release("reader_finalizer")
@@ -27334,9 +27412,26 @@ function Plugin:_finish_suspend_reader_finalizer(ok,generation,stage)
         "generation=",tostring(power.generation),
         "download_continue=",tostring(download_continue),
         "download_reason=",download_reason,
+        "extension_continue=",tostring(extension_continue),
+        "extension_reason=",tostring(extension_reason),
         "remaining_download=",tostring(remaining.download==true),
+        "remaining_extension=",tostring(remaining.extension_download==true),
         "remaining_reader_finalizer=",tostring(remaining.reader_finalizer==true))
     return true
+end
+
+function Plugin:_extension_download_continue_locked()
+    if not self.extension_task or type(self.extension_task.can_continue_locked)~="function" then
+        return false,"no_extension_task"
+    end
+    -- Kindle has an explicit ScreenSaver Hold backend. Kobo/Android keep the
+    -- conservative policy: preserve the task and resume after wake/foreground.
+    if PseudoLockscreen.device_platform()~="kindle" then
+        return false,"platform_pause"
+    end
+    local ok,value,reason=pcall(self.extension_task.can_continue_locked,self.extension_task)
+    if not ok then return false,"check_failed" end
+    return value==true,tostring(reason or "unknown")
 end
 
 function Plugin:_suspend_lease_names(snapshot)
@@ -27473,6 +27568,7 @@ function Plugin:onSuspend()
         if ok then download_continue=value==true; download_reason=tostring(reason or "unknown")
         else download_reason="check_failed" end
     end
+    local extension_continue,extension_reason=self:_extension_download_continue_locked()
     local sync_continue=false
     local suspend_background_supported=PseudoLockscreen.background_supported()==true
     local sync_candidate=suspend_background_supported
@@ -27493,11 +27589,13 @@ function Plugin:onSuspend()
     local pseudo_active=false
     if power_platform=="kindle" then
         pcall(PseudoLockscreen.set_download_active,download_continue)
+        pcall(PseudoLockscreen.set_task_active,"extension_download",extension_continue)
         if sync_candidate then pcall(PseudoLockscreen.set_task_active,"reader_finalizer",true) end
     end
-    local wants_background=download_continue or (power_platform=="kindle" and sync_candidate)
+    local wants_background=download_continue or extension_continue or (power_platform=="kindle" and sync_candidate)
     if wants_background then
-        local ok,entered,reason=pcall(PseudoLockscreen.begin,download_continue and "download_or_sync" or "reader_finalizer")
+        local hold_reason=(download_continue or extension_continue) and "download_or_sync" or "reader_finalizer"
+        local ok,entered,reason=pcall(PseudoLockscreen.begin,hold_reason)
         pseudo_active=ok and entered==true
         logger.info("[MiuRead][Power] background hold request",
             "platform=",tostring(power_platform),
@@ -27507,6 +27605,11 @@ function Plugin:onSuspend()
                 download_continue=false
                 download_reason="background_hold_failed:"..tostring(ok and reason or entered or "error")
                 if power_platform=="kindle" then pcall(PseudoLockscreen.set_download_active,false) end
+            end
+            if extension_continue then
+                extension_continue=false
+                extension_reason="background_hold_failed:"..tostring(ok and reason or entered or "error")
+                if power_platform=="kindle" then pcall(PseudoLockscreen.set_task_active,"extension_download",false) end
             end
             if power_platform=="kindle" and sync_candidate then
                 sync_candidate=false
@@ -27600,7 +27703,8 @@ function Plugin:onSuspend()
     -- same SCREEN_SAVER_HOLD session as a download.
     local backend_active=(pseudo_active or PseudoLockscreen.active())==true
     local backend_hold_state=power_platform=="kindle" and "SCREEN_SAVER_HOLD" or "PSEUDO_LOCKED"
-    local power_target=download_continue
+    local transfer_continue=download_continue or extension_continue
+    local power_target=transfer_continue
         and (backend_active and backend_hold_state or "DOWNLOAD_LOCKED")
         or (sync_continue
             and ((power_platform=="kindle" and backend_active) and "SCREEN_SAVER_HOLD" or "BACKGROUND_LOCKED")
@@ -27608,6 +27712,8 @@ function Plugin:onSuspend()
     local power=PowerState.transition(power_target,"onSuspend",{
         download_active=self.download_task and self.download_task:busy() or false,
         download_continue=download_continue,
+        extension_active=self.extension_task and self.extension_task:running() or false,
+        extension_continue=extension_continue,
         sync_continue=sync_continue,
     })
     self._power_suspend_generation=power.generation
@@ -27616,6 +27722,8 @@ function Plugin:onSuspend()
         "generation=",tostring(power.generation),
         "download_continue=",tostring(download_continue),
         "download_reason=",download_reason,
+        "extension_continue=",tostring(extension_continue),
+        "extension_reason=",tostring(extension_reason),
         "reader_finalizer=",tostring(sync_continue),
         "sleep_origin=",tostring(sleep_origin or "device_or_koreader"))
     self:_power_diagnostic("SleepDiagnostic",power_target,download_continue,download_reason)
@@ -27708,11 +27816,17 @@ function Plugin:onSuspend()
     if self.download_task then
         -- Keep reader_finalizer's device hold separate from DownloadTask. A
         -- SCREEN_SAVER_HOLD caused only by sync must look like REAL_SUSPEND to
-        -- the download subsystem, otherwise it may restore Wi-Fi with no task.
+        -- the book subsystem, otherwise it may restore Wi-Fi with no task.
         local download_power_target=(not self:_passive_prefetch_active() and download_continue)
             and (backend_active and backend_hold_state or "DOWNLOAD_LOCKED")
             or "REAL_SUSPEND"
         self.download_task:on_suspend(download_power_target,power.generation)
+    end
+    if self.extension_task and type(self.extension_task.on_suspend)=="function" then
+        local extension_power_target=extension_continue
+            and (backend_active and backend_hold_state or "DOWNLOAD_LOCKED")
+            or "REAL_SUSPEND"
+        pcall(self.extension_task.on_suspend,self.extension_task,extension_power_target,power.generation)
     end
     self._suspended_at=os.time()
     self:_background_log_state("suspend lifecycle",true)
@@ -27743,6 +27857,9 @@ function Plugin:onResume()
         if self.download_task then
             pcall(self.download_task.on_suspend,self.download_task,"PSEUDO_LOCKED",power.generation)
         end
+        if self.extension_task and type(self.extension_task.on_suspend)=="function" then
+            pcall(self.extension_task.on_suspend,self.extension_task,"PSEUDO_LOCKED",power.generation)
+        end
         logger.info("[MiuRead][Power] internal pseudo-lock resume held",
             "generation=",tostring(power.generation))
         logger.info("[MiuRead][ReadingLifecycle] INTERNAL_WAKE",
@@ -27762,6 +27879,10 @@ function Plugin:onResume()
         local ok,err=pcall(self.download_task.on_user_resume_begin,self.download_task,PowerState.generation())
         if not ok then logger.warn("[MiuRead][Power] download wake-priority release failed",tostring(err)) end
     end
+    if self.extension_task and type(self.extension_task.on_user_resume_begin)=="function" then
+        local ok,err=pcall(self.extension_task.on_user_resume_begin,self.extension_task,PowerState.generation())
+        if not ok then logger.warn("[MiuRead][Power] extension wake-priority release failed",tostring(err)) end
+    end
     self:_reconcile_power_leases("user_resume")
     self._miuread_suspended=false
     HOME_SESSION.suspended=false
@@ -27776,6 +27897,11 @@ function Plugin:onResume()
     else
         require("miuread.network_health").clear()
         HomeData.invalidate_device_state()
+    end
+    -- ExtensionTask has its own 1/3/6 second stable-network gate. It never
+    -- starts a transport directly on the raw wake edge.
+    if self.extension_task and type(self.extension_task.on_resume)=="function" then
+        pcall(self.extension_task.on_resume,self.extension_task)
     end
     local close_pending=reader_close_active()
     local native_menu_pending=NATIVE_MENU_GUARD.active==true

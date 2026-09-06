@@ -17,7 +17,12 @@ local ButtonDialog=require("ui/widget/buttondialog")
 local Async=require("miuread.async")
 local Catalog=require("miuread.extension_catalog")
 local Compat=require("miuread.extension_compat")
-local ExtensionInstaller=require("miuread.extension_installer")
+local ExtensionInstaller=require("miuread.extension_installer") -- legacy community planner
+local ExtensionPackage=require("miuread.extension_package")
+local ExtensionVerifier=require("miuread.extension_verifier")
+local DownloadProgress=require("miuread.download_progress")
+local SuspendWorkLease=require("miuread.suspend_work_lease")
+local PseudoLockscreen=require("miuread.pseudo_lockscreen")
 
 local M={}
 
@@ -36,8 +41,6 @@ local UPDATE_VISIBLE_TTL=24*60*60
 local MAX_ARCHIVE_ENTRIES=6000
 local MAX_PLUGIN_FILES=5000
 local MAX_PLUGIN_BYTES=96*1024*1024
-local EXTENSION_STALL_SECONDS=60
-local EXTENSION_CONNECT_SECONDS=18
 local EXTENSION_TEMP_TTL=24*60*60
 local EXTENSION_STAGE_TTL=6*60*60
 local SELF_REPO="miumiupy98-art/miuread-koreader"
@@ -84,48 +87,9 @@ local function save_extension_network(plugin,value)
     plugin.store:flush()
 end
 
-local function route_label(key)
-    if key=="direct" then return "GitHub 直连" end
-    if key:sub(1,7)=="mirror:" then return "镜像 "..key:sub(8) end
-    if key=="custom" then return "自定义镜像" end
-    return key
-end
-
-local function update_route_health(plugin,key,ok,detail)
-    local value=extension_network(plugin)
-    local health=type(value.health[key])=="table" and value.health[key] or {}
-    if ok then
-        health.success_at=os.time(); health.fail_count=0; health.last_error=nil
-    else
-        health.fail_at=os.time(); health.fail_count=math.min(8,(tonumber(health.fail_count) or 0)+1)
-        health.last_error=U.first_line(tostring(detail or "下载失败"),120)
-    end
-    value.health[key]=health
-    save_extension_network(plugin,value)
-end
-
-local function route_score(value,key,index)
-    local h=type(value.health[key])=="table" and value.health[key] or {}
-    local now=os.time()
-    local score=100-(tonumber(index) or 0)
-    local success_age=now-(tonumber(h.success_at) or 0)
-    local fail_age=now-(tonumber(h.fail_at) or 0)
-    if tonumber(h.success_at) and tonumber(h.success_at)>0 and success_age>=0 and success_age<7*24*60*60 then score=score+80 end
-    if tonumber(h.fail_at) and tonumber(h.fail_at)>0 and fail_age>=0 and fail_age<10*60 then
-        score=score-120*math.max(1,tonumber(h.fail_count) or 1)
-    end
-    return score
-end
-
 local function valid_mirror_prefix(value)
     value=trim(value)
     return value:match("^https://")~=nil
-end
-
-local function starts_with(value,prefix)
-    value=tostring(value or "")
-    prefix=tostring(prefix or "")
-    return value:sub(1,#prefix)==prefix
 end
 
 local function basename(path)
@@ -344,7 +308,7 @@ local function records(plugin)
     return cleaned
 end
 
-local function remember_install(plugin,repo,dir,path,version,source_url,remote_ref,install_channel,source_kind)
+local function remember_install(plugin,repo,dir,path,version,source_url,remote_ref,install_channel,source_kind,package_meta)
     path=canonical_path(path)
     local value=records(plugin)
     local meta=read_meta(path)
@@ -355,6 +319,9 @@ local function remember_install(plugin,repo,dir,path,version,source_url,remote_r
         remote_ref=tostring(remote_ref or ""),
         install_channel=tostring(install_channel or ""),
         source_kind=tostring(source_kind or ""),
+        package_sha256=tostring(type(package_meta)=="table" and package_meta.sha256 or ""),
+        package_size=tonumber(type(package_meta)=="table" and package_meta.size or 0) or 0,
+        package_asset=tostring(type(package_meta)=="table" and package_meta.asset_name or ""),
     }
     save_records(plugin,value)
 end
@@ -380,119 +347,6 @@ end
 local function log_url(url)
     if type(U.redact_url)=="function" then return U.redact_url(url) end
     return tostring(url or "")
-end
-
-local function command_available(name)
-    return command_ok(os.execute("command -v "..tostring(name).." >/dev/null 2>&1"))
-end
-
-local function zip_magic_valid(path)
-    local file=io.open(path,"rb")
-    if not file then return nil,"无法读取下载文件" end
-    local head=file:read(4) or ""
-    file:close()
-    if head=="PK\003\004" or head=="PK\005\006" or head=="PK\007\008" then return true end
-    local preview=U.read_file(path,true) or ""
-    preview=U.first_line(preview,100)
-    return nil,"下载内容不是 ZIP"..(preview~="" and ("（返回："..preview.."）") or "")
-end
-
-local function zip_quick_valid(path)
-    local magic,why=zip_magic_valid(path)
-    if not magic then return nil,why end
-    -- When unzip is present, validate the complete central directory before a
-    -- route is considered successful. A proxy can return a truncated file that
-    -- still starts with PK; that must fail over to the next route rather than
-    -- being misreported later as a plugin-structure error.
-    if command_available("unzip") then
-        local ok=command_ok(os.execute("unzip -tqq "..U.shell_quote(path).." >/dev/null 2>&1"))
-        if not ok then return nil,"ZIP 下载不完整或已经损坏" end
-    end
-    return true
-end
-
-local function curl_download_file(url,path,options)
-    options=options or {}
-    local connect_timeout=math.max(2,math.floor(tonumber(options.connect_timeout) or EXTENSION_CONNECT_SECONDS))
-    local stall_seconds=math.max(15,math.floor(tonumber(options.stall_seconds) or EXTENSION_STALL_SECONDS))
-    local speed_limit=math.max(1,math.floor(tonumber(options.speed_limit) or 1024))
-    local partial=path..".part"
-    local status_path=path..".curl.status"
-    local error_path=path..".curl.error"
-    os.remove(status_path); os.remove(error_path); os.remove(path)
-
-    local function run(resume)
-        local cmd="curl -L --fail --silent --show-error --connect-timeout "..tostring(connect_timeout)
-            .." --speed-limit "..tostring(speed_limit).." --speed-time "..tostring(stall_seconds)
-            .." --retry 1 --retry-delay 1"
-        if resume and (U.file_size(partial) or 0)>0 then cmd=cmd.." -C -" end
-        for _,header in ipairs(options.headers or {}) do
-            cmd=cmd.." -H "..U.shell_quote(tostring(header))
-        end
-        cmd=cmd.." -o "..U.shell_quote(partial)
-            .." -w "..U.shell_quote("%{http_code}")
-            .." "..U.shell_quote(url)
-            .." >"..U.shell_quote(status_path).." 2>"..U.shell_quote(error_path)
-        local before=U.file_size(partial) or 0
-        local ok=command_ok(os.execute(cmd))
-        local after=U.file_size(partial) or 0
-        local status=trim(U.read_file(status_path,true) or "")
-        local err=trim(U.read_file(error_path,true) or "")
-        os.remove(status_path); os.remove(error_path)
-        return ok,status,err,before,after
-    end
-
-    local had_partial=(U.file_size(partial) or 0)>0
-    local ok,status,err,before,after=run(had_partial)
-    if not ok and had_partial then
-        local low=err:lower()
-        local range_rejected=status=="416" or low:find("range",1,true)~=nil
-            or low:find("resume",1,true)~=nil or low:find("byte",1,true)~=nil
-        if range_rejected then
-            os.remove(partial)
-            ok,status,err,before,after=run(false)
-        end
-    end
-    if not ok or (U.file_size(partial) or 0)<=0 then
-        return false,nil,{status=status,error=err~="" and err or "curl 下载失败",partial_bytes=U.file_size(partial) or after or before or 0}
-    end
-    local valid,why=zip_quick_valid(partial)
-    if not valid then
-        os.remove(partial)
-        return false,nil,{status=status,error=why or "下载内容无效",partial_bytes=0}
-    end
-    os.remove(path)
-    local moved,move_error=os.rename(partial,path)
-    if not moved then
-        return false,nil,{status=status,error="无法保存下载文件："..tostring(move_error or "rename failed"),partial_bytes=U.file_size(partial) or 0}
-    end
-    return true,U.file_size(path) or 0,{status=status,resumed=had_partial==true}
-end
-
-local function wget_download_file(url,path,options)
-    options=options or {}
-    local stall_seconds=math.max(15,math.floor(tonumber(options.stall_seconds) or EXTENSION_STALL_SECONDS))
-    local partial=path..".part"
-    local error_path=path..".wget.error"
-    os.remove(error_path); os.remove(path)
-    local before=U.file_size(partial) or 0
-    local cmd="wget -c -T "..tostring(stall_seconds).." -t 2 -O "..U.shell_quote(partial)
-        .." "..U.shell_quote(url).." 2>"..U.shell_quote(error_path)
-    local ok=command_ok(os.execute(cmd))
-    local err=trim(U.read_file(error_path,true) or "")
-    os.remove(error_path)
-    if not ok or (U.file_size(partial) or 0)<=0 then
-        return false,nil,{error=err~="" and U.first_line(err,180) or "wget 下载失败",partial_bytes=U.file_size(partial) or before}
-    end
-    local valid,why=zip_quick_valid(partial)
-    if not valid then
-        os.remove(partial)
-        return false,nil,{error=why or "下载内容无效",partial_bytes=0}
-    end
-    os.remove(path)
-    local moved,move_error=os.rename(partial,path)
-    if not moved then return false,nil,{error="无法保存下载文件："..tostring(move_error or "rename failed"),partial_bytes=U.file_size(partial) or 0} end
-    return true,U.file_size(path) or 0,{resumed=before>0}
 end
 
 local function classify_github_error(err)
@@ -654,122 +508,6 @@ local function source_installability(plugin,repo,repo_info)
     end
     table.sort(roots)
     return {installable=#roots>0,roots=roots,updated_at=os.time()}
-end
-
-local function github_package_routes(plugin,url)
-    local direct={key="direct",label="GitHub 直连",url=url,index=0}
-    if not starts_with(url,"https://github.com/") then return {direct} end
-
-    local value=extension_network(plugin)
-    local mirrors={}
-    for index,prefix in ipairs(Config.GITHUB_MIRRORS or {}) do
-        prefix=trim(prefix)
-        if valid_mirror_prefix(prefix) then
-            if prefix:sub(-1)~="/" then prefix=prefix.."/" end
-            mirrors[#mirrors+1]={key="mirror:"..tostring(index),label="镜像 "..tostring(index),url=prefix..url,index=index}
-        end
-    end
-    if valid_mirror_prefix(value.custom_prefix) then
-        local prefix=value.custom_prefix
-        if prefix:sub(-1)~="/" then prefix=prefix.."/" end
-        mirrors[#mirrors+1]={key="custom",label="自定义镜像",url=prefix..url,index=#mirrors+1}
-    end
-
-    if value.mode=="direct" then return {direct} end
-    if value.mode=="custom" then
-        for _,route in ipairs(mirrors) do if route.key=="custom" then return {route} end end
-        return {direct}
-    end
-    local selected=value.mode:match("^mirror:(%d+)$")
-    if selected then
-        selected=tonumber(selected)
-        for _,route in ipairs(mirrors) do if route.index==selected then return {route} end end
-        return {direct}
-    end
-
-    local routes={direct}
-    for _,route in ipairs(mirrors) do if route.key~="custom" then routes[#routes+1]=route end end
-    table.sort(routes,function(a,b)
-        local sa=route_score(value,a.key,a.index)
-        local sb=route_score(value,b.key,b.index)
-        if sa~=sb then return sa>sb end
-        return a.index<b.index
-    end)
-    return routes
-end
-
-local function format_download_attempts(attempts)
-    local rows={}
-    for _,attempt in ipairs(type(attempts)=="table" and attempts or {}) do
-        local label=tostring(attempt.label or route_label(tostring(attempt.key or "")))
-        if attempt.ok==true then
-            rows[#rows+1]=label.."：成功"
-        else
-            local detail=trim(attempt.error)
-            if detail=="" then detail="下载失败" end
-            rows[#rows+1]=label.."："..U.first_line(detail,120)
-        end
-    end
-    return table.concat(rows,"\n")
-end
-
-local function download_package(plugin,url,label,target_override)
-    local target=trim(target_override)
-    if target=="" then
-        target=plugin.store.temp_dir.."/extension-download-"..U.id_name(label or os.time())..".zip"
-    end
-    local attempts={}
-    local curl_ok=command_available("curl")
-    local wget_ok=not curl_ok and command_available("wget")
-    for _,route in ipairs(github_package_routes(plugin,url)) do
-        logger.info("[MiuRead][Extensions] package download start","route=",route.key,"url=",log_url(route.url),"resume_bytes=",tostring(U.file_size(target..".part") or 0))
-        if curl_ok then
-            local ok,size,detail=curl_download_file(route.url,target,{connect_timeout=EXTENSION_CONNECT_SECONDS,stall_seconds=EXTENSION_STALL_SECONDS})
-            if ok then
-                attempts[#attempts+1]={key=route.key,label=route.label,ok=true,bytes=size,url=route.url}
-                logger.info("[MiuRead][Extensions] package download success","route=",route.key,"bytes=",tostring(size or 0),"url=",log_url(route.url))
-                return target,route.url,attempts,route.key
-            end
-            local err=type(detail)=="table" and tostring(detail.error or "curl 下载失败") or tostring(detail or "curl 下载失败")
-            attempts[#attempts+1]={key=route.key,label=route.label,ok=false,error=err,partial_bytes=type(detail)=="table" and detail.partial_bytes or nil}
-            logger.warn("[MiuRead][Extensions] package curl route failed",route.key,log_url(route.url),err)
-        elseif wget_ok then
-            local ok,size,detail=wget_download_file(route.url,target,{stall_seconds=EXTENSION_STALL_SECONDS})
-            if ok then
-                attempts[#attempts+1]={key=route.key,label=route.label,ok=true,bytes=size,url=route.url}
-                logger.info("[MiuRead][Extensions] package wget success","route=",route.key,"bytes=",tostring(size or 0))
-                return target,route.url,attempts,route.key
-            end
-            local err=type(detail)=="table" and tostring(detail.error or "wget 下载失败") or tostring(detail or "wget 下载失败")
-            attempts[#attempts+1]={key=route.key,label=route.label,ok=false,error=err,partial_bytes=type(detail)=="table" and detail.partial_bytes or nil}
-            logger.warn("[MiuRead][Extensions] package wget route failed",route.key,log_url(route.url),err)
-        else
-            -- Last-resort ports without curl/wget use KOReader's streaming HTTP
-            -- sink. This path cannot persist Range resume, but it still keeps a
-            -- long bounded socket deadline and performs the same full ZIP check.
-            os.remove(target)
-            local ok,result=pcall(function()
-                return plugin.http:download_to_file(route.url,target,{
-                    auth=false,retries=1,redirects=10,timeout={EXTENSION_CONNECT_SECONDS,6*60*60},integrity_attempts=2,
-                })
-            end)
-            if ok and U.file_exists(target) and (U.file_size(target) or 0)>0 then
-                local valid,why=zip_quick_valid(target)
-                if valid then
-                    attempts[#attempts+1]={key=route.key,label=route.label,ok=true,bytes=U.file_size(target) or 0,url=route.url}
-                    return target,route.url,attempts,route.key
-                end
-                os.remove(target)
-                attempts[#attempts+1]={key=route.key,label=route.label,ok=false,error=why or "下载内容不是 ZIP"}
-            else
-                local err=tostring(result or "Lua 下载失败")
-                attempts[#attempts+1]={key=route.key,label=route.label,ok=false,error=err}
-                logger.warn("[MiuRead][Extensions] package Lua route failed",route.key,log_url(route.url),err)
-            end
-        end
-    end
-    os.remove(target)
-    return nil,format_download_attempts(attempts),attempts,nil
 end
 
 local function open_archiver(path)
@@ -1012,7 +750,7 @@ local function choose_plugin_root(unpacked,repo,selected_relative)
     return nil,{kind="multiple_plugins",candidates=choices,message="ZIP 中包含多个可安装插件，需要选择目标。"}
 end
 
-local function install_archive(plugin,repo,zip_path,source_url,version_hint,remote_ref,entry,compatibility,source_kind,install_channel,selected_relative)
+local function install_archive(plugin,repo,zip_path,source_url,version_hint,remote_ref,entry,compatibility,source_kind,install_channel,selected_relative,package_meta)
     entry=type(entry)=="table" and entry or {}
     local max_plugin_bytes=tonumber(entry.max_plugin_bytes) or MAX_PLUGIN_BYTES
     logger.info("[MiuRead][Extensions] install stage","stage=archive_open","repo=",repo,"bytes=",tostring(U.file_size(zip_path) or 0))
@@ -1039,13 +777,23 @@ local function install_archive(plugin,repo,zip_path,source_url,version_hint,remo
     end
 
     local stamp=tostring(os.time()).."-"..tostring(math.random(1000,9999))
-    local stage=plugin.store.temp_dir.."/extension-stage-"..stamp
+    -- Package Manager v3 keeps all long-lived work inside the task directory.
+    -- This prevents generic temp cleanup or an unrelated extension worker from
+    -- removing staging/backup state while an install is in progress.
+    local task_root=tostring(zip_path or ""):match("^(.*)/package%.zip$")
+    local stage=task_root and (task_root.."/stage") or (plugin.store.temp_dir.."/extension-stage-"..stamp)
+    local backup=task_root and (task_root.."/backup") or (stage.."/backup")
     local unpacked=stage.."/unpacked"
     U.remove_tree(stage)
+    if backup~=stage.."/backup" then U.remove_tree(backup) end
     U.mkdir(unpacked)
+    local function cleanup_work()
+        U.remove_tree(stage)
+        if backup~=stage.."/backup" then U.remove_tree(backup) end
+    end
     local function fail(message,failed_stage,keep_zip)
         close_archiver(reader); reader=nil
-        U.remove_tree(stage)
+        cleanup_work()
         if keep_zip~=true then os.remove(zip_path) end
         logger.warn("[MiuRead][Extensions] install failed","stage=",tostring(failed_stage or "unknown"),"repo=",repo,"error=",tostring(type(message)=="table" and (message.message or message.kind) or message))
         return nil,message,failed_stage
@@ -1072,6 +820,10 @@ local function install_archive(plugin,repo,zip_path,source_url,version_hint,remo
         return fail(target_name,keep and "plugin_select" or "plugin_detect",keep)
     end
     if target_name=="miuread.koplugin" then return fail("扩展中心不能覆盖觅阅自身","plugin_detect") end
+    local expected_dir=tostring(type(package_meta)=="table" and package_meta.expected_dir or "")
+    if expected_dir~="" and target_name~=expected_dir then
+        return fail("安装包目录与目录记录不一致：期望 "..expected_dir.."，实际 "..tostring(target_name),"plugin_detect")
+    end
     local candidate_ok,candidate_error=Compat.validate_candidate(entry,incoming,compatibility)
     if not candidate_ok then return fail(candidate_error,"architecture_validate") end
     logger.info("[MiuRead][Extensions] plugin detected","repo=",repo,"dir=",target_name)
@@ -1082,7 +834,6 @@ local function install_archive(plugin,repo,zip_path,source_url,version_hint,remo
     end
     local target_root=existing and existing.root or default_plugin_root()
     local target=target_root.."/"..target_name
-    local backup=stage.."/backup"
 
     -- The update path temporarily needs the downloaded ZIP, extracted plugin,
     -- old-plugin backup and final copy at the same time. Abort before touching
@@ -1127,13 +878,13 @@ local function install_archive(plugin,repo,zip_path,source_url,version_hint,remo
         if lfs.attributes(backup,"mode")=="directory" then
             local restored,restore_error=U.copy_tree(backup,target)
             if not restored then
-                U.remove_tree(stage)
+                cleanup_work()
                 os.remove(zip_path)
                 logger.warn("[MiuRead][Extensions] rollback failed","repo=",repo,"error=",tostring(restore_error))
                 return nil,tostring(message).."；旧版本恢复失败："..tostring(restore_error),failed_stage
             end
         end
-        U.remove_tree(stage)
+        cleanup_work()
         os.remove(zip_path)
         logger.info("[MiuRead][Extensions] rollback complete","repo=",repo,"dir=",target_name)
         return nil,tostring(message).."；已恢复旧版本",failed_stage
@@ -1153,8 +904,8 @@ local function install_archive(plugin,repo,zip_path,source_url,version_hint,remo
     if not installed_stats then return rollback(installed_stats_error,"post_validate") end
 
     local meta=read_meta(target)
-    remember_install(plugin,repo,target_name,target,meta.version~="" and meta.version or version_hint,source_url,remote_ref,install_channel,source_kind)
-    U.remove_tree(stage)
+    remember_install(plugin,repo,target_name,target,meta.version~="" and meta.version or version_hint,source_url,remote_ref,install_channel,source_kind,package_meta)
+    cleanup_work()
     os.remove(zip_path)
     logger.info("[MiuRead][Extensions] installed",repo,target_name,
         "files=",tostring(installed_stats.files),"bytes=",tostring(installed_stats.bytes),"version=",tostring(meta.version),"backend=",use_archiver and "archiver" or "unzip")
@@ -1293,6 +1044,10 @@ local function download_source_menu(plugin)
         local h=type(current.health[key])=="table" and current.health[key] or {}
         local post=current.mode==key and "当前" or ""
         if tonumber(h.success_at) and tonumber(h.success_at)>0 then post=post~="" and (post.." · 最近成功") or "最近成功" end
+        if tonumber(h.average_speed) and tonumber(h.average_speed)>0 then
+            local speed=Compat.format_bytes(h.average_speed)
+            post=post~="" and (post.." · "..speed.."/s") or (speed.."/s")
+        end
         if tonumber(h.fail_at) and os.time()-tonumber(h.fail_at)<10*60 then post=post~="" and (post.." · 暂时降级") or "暂时降级" end
         rows[#rows+1]={text="镜像 "..tostring(index),post_text=post,callback=function() set_network_mode(plugin,key) end}
     end
@@ -1694,7 +1449,64 @@ local function preflight_package_space(plugin,source,item,entry)
     return true
 end
 
-local function install_repo(plugin,repo,repo_info,release)
+local function extension_task(plugin)
+    if plugin.extension_task then return plugin.extension_task end
+    local ExtensionTask=require("miuread.extension_task")
+    plugin.extension_task=ExtensionTask:new(plugin.store)
+    return plugin.extension_task
+end
+
+local function close_extension_progress(plugin,reason)
+    local dialog=plugin._extension_download_dialog
+    plugin._extension_download_dialog=nil
+    if dialog then pcall(function() dialog:close(reason or "finished") end) end
+end
+
+local function show_extension_progress(plugin,display_name)
+    close_extension_progress(plugin,"replaced")
+    local task=extension_task(plugin)
+    local dialog
+    dialog=DownloadProgress:new{
+        title="正在下载插件 · "..tostring(display_name or "扩展"),
+        cancel_text="取消下载",
+        pause_text="暂停下载",
+        background_text="后台下载",
+        on_cancel=function()
+            local snapshot=task:snapshot()
+            if snapshot and tostring(snapshot.state or "")~="downloading" then
+                if type(plugin.status_toast)=="function" then plugin:status_toast("插件安装","当前阶段不能取消下载",3) end
+                return false
+            end
+            task:cancel()
+            close_extension_progress(plugin,"cancelled")
+            if type(plugin.status_toast)=="function" then plugin:status_toast("插件下载","已停止，断点已保留",3) end
+            -- The dialog is already closed. Tell the shared DownloadProgress
+            -- widget not to overwrite the final state with “正在取消……”.
+            return false
+        end,
+        on_pause=function()
+            local snapshot=task:snapshot()
+            if snapshot and tostring(snapshot.state or "")~="downloading" then
+                if type(plugin.status_toast)=="function" then plugin:status_toast("插件安装","当前阶段不能暂停",3) end
+                return false
+            end
+            task:pause("manual")
+            if type(plugin.status_toast)=="function" then plugin:status_toast("插件下载","已暂停，断点已保留",3) end
+        end,
+        on_background=function()
+            close_extension_progress(plugin,"background")
+            if type(plugin.status_toast)=="function" then plugin:status_toast("插件下载",tostring(display_name or "扩展").."已转入下载中心",3) end
+        end,
+        on_close=function(widget)
+            if plugin._extension_download_dialog==widget then plugin._extension_download_dialog=nil end
+        end,
+    }
+    plugin._extension_download_dialog=dialog
+    dialog:show()
+    return dialog
+end
+
+local function install_repo(plugin,repo,repo_info,release,forced_source)
     if type(repo_info)~="table" then
         plugin:info("无法读取 GitHub 仓库信息。")
         return
@@ -1710,134 +1522,316 @@ local function install_repo(plugin,repo,repo_info,release)
         return
     end
     local installed_record=installed and record_for_installed(plugin,installed) or nil
-    local sources,plan_error,compatibility=ExtensionInstaller.plan(entry,plugin,repo,repo_info,release,installed_record)
+    local sources,plan_error,compatibility,plan_meta
+    if type(forced_source)=="table" and trim(forced_source.url)~="" then
+        sources={U.copy(forced_source)}
+        compatibility=Compat.evaluate(entry,plugin)
+        if compatibility.installable~=true then
+            plugin:info(compatibility.block_reason or "当前设备不支持自动安装此扩展。")
+            return
+        end
+        plan_meta={mode="resume",deterministic=forced_source.deterministic==true}
+    else
+        sources,plan_error,compatibility,plan_meta=ExtensionPackage.plan(entry,plugin,repo,repo_info,release,installed_record)
+    end
     if not sources or #sources==0 then
         plugin:info(plan_error or "当前没有可安全自动安装的插件包。")
         return
     end
-    local retryable={archive_validate=true,extract=true,extract_validate=true,plugin_detect=true,architecture_validate=true}
+
     local display_name=display_repo_name(repo_info,entry)
+    local task=extension_task(plugin)
     local candidate_errors={}
 
-    local function complete(result)
+    local function complete(result,source)
         result.name=display_name
         mark_pending(plugin,result,result.updated and "updated" or "installed")
         local states=update_state(plugin)
         states[canonical_path(result.path)]=nil
         save_update_state(plugin,states)
+        task:complete_install{
+            install_dir=result.dir,installed_path=result.path,
+            installed_version=result.version,source_kind=source and source.source or nil,
+        }
+        close_extension_progress(plugin,"finished")
         local action=result.updated and "更新完成" or "安装完成"
         local version=result.version~="" and ("\n版本："..result.version) or ""
         if type(plugin._refresh_miuread_menu)=="function" then plugin:_refresh_miuread_menu() end
         plugin:info(action.."："..result.dir..version.."\n\n请完整重启 KOReader 后使用。")
     end
 
-    local function fail_all(last_error)
+    local function fail_message(last_error)
         local rows={"扩展安装失败。",""}
         if #candidate_errors>0 then
             rows[#rows+1]="尝试记录："
-            for _,item in ipairs(candidate_errors) do
-                rows[#rows+1]="• "..tostring(item)
-            end
+            for _,item in ipairs(candidate_errors) do rows[#rows+1]="• "..tostring(item) end
         end
         if last_error and tostring(last_error)~="" then
             rows[#rows+1]=""
             rows[#rows+1]=U.first_line(tostring(last_error),260)
         end
         local probe=type(repo_info.source_probe)=="table" and repo_info.source_probe or {}
-        if probe.installable==false then
+        if probe.installable==false and not (plan_meta and plan_meta.deterministic==true) then
             rows[#rows+1]=""
-            rows[#rows+1]="仓库源码已确认不是可直接安装的 KOReader 插件，因此没有用源码包伪装成 Release 兜底。"
+            rows[#rows+1]="仓库源码已确认不是可直接安装的 KOReader 插件，因此没有使用源码包兜底。"
         end
-        plugin:info(table.concat(rows,"\n"))
+        return table.concat(rows,"\n")
     end
 
-    local attempt
-    attempt=function(index,last_error)
-        local source=sources[index]
-        if not source then fail_all(last_error); return end
+    local function install_downloaded(source,value,selected_relative)
+        task:set_phase("verifying","正在校验下载文件")
+        local verified,verify_error,verify_kind=ExtensionVerifier.verify(value.path,source)
+        if not verified then
+            -- A complete package that fails size/SHA/ZIP verification is not a
+            -- resumable canonical artifact. Remove only package.zip; any saved
+            -- package.part remains available to the recovery layer.
+            os.remove(value.path)
+            candidate_errors[#candidate_errors+1]=ExtensionPackage.describe(source).."："..U.first_line(verify_error or "校验失败",180)
+            task:fail_install(verify_error or "下载校验失败",verify_kind or "verify")
+            close_extension_progress(plugin,"failed")
+            plugin:info(fail_message(verify_error))
+            return
+        end
+
+        task:set_phase("extracting","正在检查插件结构",{verified_size=verified.size,verified_sha256=verified.sha256})
+        local lease_ok=SuspendWorkLease.acquire("extension_install")
+        pcall(PseudoLockscreen.set_task_active,"extension_install",true)
+        UIManager:nextTick(function()
+            task:set_phase("installing",selected_relative and "正在安装所选插件" or "正在安装插件")
+            local ok,result,err,failed_stage=xpcall(function()
+                return install_archive(plugin,repo,value.path,value.used_url,source.version,source.remote_ref,
+                    entry,compatibility,source.source,source.channel,selected_relative,source)
+            end,debug.traceback)
+            if lease_ok then SuspendWorkLease.release("extension_install") end
+            pcall(PseudoLockscreen.set_task_active,"extension_install",false)
+            pcall(PseudoLockscreen.background_task_done,"extension_install")
+
+            if not ok then
+                local message=U.first_line(tostring(result),300)
+                task:fail_install(message,"install_exception")
+                close_extension_progress(plugin,"failed")
+                plugin:info("扩展安装失败。\n\n"..message)
+                return
+            end
+            if result then complete(result,source); return end
+            if tostring(failed_stage or "")=="plugin_select" and type(err)=="table" and type(err.candidates)=="table" then
+                task:set_phase("installing","请选择要安装的插件目录")
+                local rows={}
+                for _,choice in ipairs(err.candidates) do
+                    local target_choice=choice
+                    rows[#rows+1]={
+                        text=tostring(target_choice.name or target_choice.target_name),
+                        post_text=tostring(target_choice.relative or ""),
+                        keep_menu_open=true,
+                        callback=function()
+                            UIManager:nextTick(function() install_downloaded(source,value,target_choice.relative) end)
+                        end,
+                    }
+                end
+                rows[#rows+1]={text="取消安装",callback=function()
+                    task:cancel(); close_extension_progress(plugin,"cancelled")
+                end}
+                show_menu(plugin,"选择要安装的插件",rows)
+                return
+            end
+            local last=tostring(err or "安装失败")
+            candidate_errors[#candidate_errors+1]=ExtensionPackage.describe(source).."："..U.first_line(last,180)
+            task:fail_install(last,tostring(failed_stage or "install"))
+            close_extension_progress(plugin,"failed")
+            plugin:info(fail_message(last))
+        end)
+    end
+
+    local function start_source(source)
         local enough,space_error=preflight_package_space(plugin,source,installed,entry)
         if not enough then plugin:info(space_error); return end
-
-        local stable_id=repo.."-"..tostring(source.source or index).."-"..tostring(source.asset_name or source.version or index)
-        local target=plugin.store.temp_dir.."/extension-download-"..U.id_name(stable_id)..".zip"
-        local download_text=(installed and "正在下载扩展更新……" or "正在下载扩展……")
-        run_async_with_progress(plugin,download_text,"extension_download",function()
-            local path,used_or_error,attempts,route_key=download_package(plugin,source.url,stable_id,target)
-            if path then return {ok=true,path=path,used_url=used_or_error,attempts=attempts,route_key=route_key} end
-            return {ok=false,error=tostring(used_or_error or "下载失败"),attempts=attempts}
-        end,function(value,worker_error)
-            local route_attempts=type(value)=="table" and value.attempts or nil
-            for _,route in ipairs(type(route_attempts)=="table" and route_attempts or {}) do
-                update_route_health(plugin,tostring(route.key or "direct"),route.ok==true,route.error)
-            end
+        local dialog=show_extension_progress(plugin,display_name)
+        local spec={
+            repo=repo,name=display_name,version=tostring(source.version or ""),url=tostring(source.url or ""),
+            size=tonumber(source.size) or 0,sha256=tostring(source.sha256 or ""),
+            deterministic=source.deterministic==true,asset_name=tostring(source.asset_name or ""),
+            expected_dir=tostring(source.expected_dir or ""),layout=tostring(source.layout or ""),
+            source=tostring(source.source or "release-asset"),channel=tostring(source.channel or ""),
+            remote_ref=tostring(source.remote_ref or ""),
+        }
+        local started,start_error=task:start(spec,function(state)
+            if dialog and type(dialog.set_state)=="function" then dialog:set_state(state) end
+        end,function(value,worker_error,task_snapshot)
             if worker_error then
-                os.remove(target)
-                logger.warn("[MiuRead][Extensions] package worker failed",repo,tostring(worker_error))
-                candidate_errors[#candidate_errors+1]=tostring(source.source or "package").."："..U.first_line(worker_error,140)
-                attempt(index+1,worker_error)
+                candidate_errors[#candidate_errors+1]=ExtensionPackage.describe(source).."："..U.first_line(worker_error,180)
+                close_extension_progress(plugin,"failed")
+                plugin:info(fail_message(worker_error))
                 return
             end
-            if type(value)~="table" or value.ok~=true or not value.path then
-                os.remove(target)
-                local err=type(value)=="table" and value.error or "下载失败"
-                logger.warn("[MiuRead][Extensions] package candidate download failed",repo,tostring(source.source),tostring(err))
-                candidate_errors[#candidate_errors+1]=tostring(source.asset_name or source.source or "package").."："..U.first_line(err,180)
-                attempt(index+1,err)
+            if type(value)~="table" or not value.path then
+                local err=(task_snapshot and task_snapshot.error) or "下载失败"
+                candidate_errors[#candidate_errors+1]=ExtensionPackage.describe(source).."："..U.first_line(err,180)
+                close_extension_progress(plugin,"failed")
+                plugin:info(fail_message(err))
                 return
             end
-
-            local function inspect_and_install(selected_relative)
-                local dialog=InfoMessage:new{text=selected_relative and "正在安装所选扩展……" or "正在检查并安装扩展……"}
-                UIManager:show(dialog)
-                UIManager:nextTick(function()
-                    local ok,result,err,failed_stage=xpcall(function()
-                        return install_archive(plugin,repo,value.path,value.used_url,source.version,source.remote_ref,
-                            entry,compatibility,source.source,source.channel,selected_relative)
-                    end,debug.traceback)
-                    pcall(function() UIManager:close(dialog) end)
-                    if not ok then
-                        os.remove(value.path)
-                        plugin:info("扩展安装失败。\n\n"..U.first_line(tostring(result),300))
-                        return
-                    end
-                    if result then complete(result); return end
-                    if tostring(failed_stage or "")=="plugin_select" and type(err)=="table" and type(err.candidates)=="table" then
-                        local rows={}
-                        for _,choice in ipairs(err.candidates) do
-                            local target_choice=choice
-                            rows[#rows+1]={
-                                text=tostring(target_choice.name or target_choice.target_name),
-                                post_text=tostring(target_choice.relative or ""),
-                                keep_menu_open=true,
-                                callback=function()
-                                    if plugin._extension_menu then pcall(function() UIManager:close(plugin._extension_menu) end) end
-                                    UIManager:nextTick(function() inspect_and_install(target_choice.relative) end)
-                                end,
-                            }
-                        end
-                        rows[#rows+1]={text="取消安装",callback=function() os.remove(value.path) end}
-                        show_menu(plugin,"选择要安装的插件",rows)
-                        return
-                    end
-                    local last=tostring(err or "安装失败")
-                    candidate_errors[#candidate_errors+1]=tostring(source.asset_name or source.source or "package").."："..U.first_line(last,180)
-                    if retryable[tostring(failed_stage or "")] then
-                        logger.warn("[MiuRead][Extensions] trying next package candidate",repo,tostring(failed_stage),last)
-                        UIManager:nextTick(function() attempt(index+1,last) end)
-                        return
-                    end
-                    plugin:info("扩展安装失败。\n\n"..last)
-                end)
-            end
-            inspect_and_install(nil)
-        end,0,{cancel_cleanup=function()
-            -- Keep .part for a later resume; only remove a completed-but-not-yet-
-            -- installed ZIP when the user explicitly cancels this attempt.
-            os.remove(target)
-        end})
+            install_downloaded(source,value,nil)
+        end)
+        if not started then
+            close_extension_progress(plugin,"failed")
+            plugin:info("无法启动插件下载任务：\n"..tostring(start_error or "未知错误"))
+            return
+        end
+        if dialog then dialog:set_state(task:snapshot() or {kind="extension",state="downloading",stage="download"}) end
     end
 
-    attempt(1,"没有找到可安装的插件包")
+    -- Dynamic discovery stays open, but ambiguous Release/source choices are
+    -- explicit. Only a deterministic catalog package may skip this chooser.
+    if plan_meta and plan_meta.deterministic~=true and #sources>1 then
+        local rows={}
+        for _,source in ipairs(sources) do
+            local selected=source
+            rows[#rows+1]={
+                text=ExtensionPackage.describe(selected),
+                post_text=tonumber(selected.size or 0)>0 and Compat.format_bytes(selected.size) or tostring(selected.channel or ""),
+                callback=function() start_source(selected) end,
+            }
+        end
+        rows[#rows+1]={text="取消",separator=true,callback=function() end}
+        show_menu(plugin,"选择安装包 · "..display_name,rows)
+        return
+    end
+
+    start_source(sources[1])
+end
+
+local function format_transfer_bytes(value)
+    local n=math.max(0,tonumber(value) or 0)
+    if n>=1024*1024*1024 then return string.format("%.1f GB",n/(1024*1024*1024)) end
+    if n>=1024*1024 then return string.format("%.1f MB",n/(1024*1024)) end
+    if n>=1024 then return string.format("%.0f KB",n/1024) end
+    return tostring(math.floor(n+.5)).." B"
+end
+
+local function extension_task_label(task)
+    task=type(task)=="table" and task or {}
+    local state=tostring(task.state or "")
+    local labels={
+        downloading="正在下载",waiting_network="等待网络",paused_user="已暂停",paused_power="设备休眠",
+        interrupted="可继续",cancelled_resumable="已停止 · 可继续",downloaded="下载完成",verifying="正在校验",
+        extracting="正在解压",installing="正在安装",completed="安装完成",failed="未完成",
+    }
+    local label=labels[state] or (state~="" and state or "插件任务")
+    local total=tonumber(task.total_bytes or task.size) or 0
+    local bytes=tonumber(task.downloaded_bytes) or 0
+    local percent=tonumber(task.percent)
+    if not percent and total>0 then percent=bytes/total end
+    if percent and percent>1 then percent=percent/100 end
+    if percent and percent>0 and state~="completed" then label=label.." · "..tostring(math.floor(percent*100+.5)).."%" end
+    return label
+end
+
+local function show_extension_task_detail(plugin,target)
+    local manager=extension_task(plugin)
+    local current=manager:snapshot()
+    local task=(current and target and current.task_id==target.task_id) and current or target
+    if not task then plugin:info("插件下载任务已经不存在。") return end
+    local is_current=current and current.task_id==task.task_id
+    local state=tostring(task.state or "")
+
+    if is_current and state=="downloading" then
+        local dialog=show_extension_progress(plugin,task.name or task.repo)
+        manager:set_callbacks(function(progress)
+            if dialog then dialog:set_state(progress) end
+        end,manager.on_done)
+        dialog:set_state(task)
+        return
+    end
+
+    local rows={extension_task_label(task),tostring(task.name or task.repo or "扩展")}
+    local total=tonumber(task.total_bytes or task.size) or 0
+    local bytes=tonumber(task.downloaded_bytes) or 0
+    if total>0 or bytes>0 then rows[#rows+1]=format_transfer_bytes(bytes)..(total>0 and (" / "..format_transfer_bytes(total)) or "") end
+    if tonumber(task.speed_bps or 0)>0 then rows[#rows+1]="速度 "..format_transfer_bytes(task.speed_bps).."/s" end
+    if trim(task.message)~="" then rows[#rows+1]=trim(task.message) end
+    if trim(task.error)~="" then rows[#rows+1]="\n"..U.first_line(task.error,220) end
+
+    local buttons={}
+    local dialog
+    if state=="downloaded" then
+        buttons[#buttons+1]={{text="继续安装",callback=function()
+            UIManager:close(dialog)
+            local activated,activate_error=manager:activate(task)
+            if not activated then plugin:info(activate_error or "无法切换到此插件任务。") return end
+            local spec=type(task.spec)=="table" and U.copy(task.spec) or nil
+            if not spec or trim(spec.url)=="" then
+                plugin:info("此任务缺少安装包来源信息，请从插件详情重新安装。")
+                return
+            end
+            install_repo(plugin,tostring(task.repo or ""),{
+                name=tostring(task.name or task.repo or "扩展"),archived=false,default_branch="main",
+                source_probe={installable=nil},
+            },nil,spec)
+        end}}
+    elseif (state=="paused_user" or state=="paused_power" or state=="waiting_network"
+        or state=="interrupted" or state=="cancelled_resumable" or state=="failed") then
+        buttons[#buttons+1]={{text="继续下载",callback=function()
+            UIManager:close(dialog)
+            local activated,activate_error=manager:activate(task)
+            if not activated then plugin:info(activate_error or "无法切换到此插件任务。") return end
+            local spec=type(task.spec)=="table" and U.copy(task.spec) or nil
+            if not spec or trim(spec.url)=="" then
+                plugin:info("此任务缺少下载来源信息，请从插件详情重新安装。")
+                return
+            end
+            -- Re-enter the package pipeline rather than resuming a transport in
+            -- isolation. This reconnects verification/install callbacks after a
+            -- KOReader restart while reusing the preserved task/package.part.
+            install_repo(plugin,tostring(task.repo or ""),{
+                name=tostring(task.name or task.repo or "扩展"),archived=false,default_branch="main",
+                source_probe={installable=nil},
+            },nil,spec)
+        end}}
+    end
+    if is_current and state=="downloading" then
+        buttons[#buttons+1]={{text="暂停下载",callback=function() UIManager:close(dialog); manager:pause("manual") end}}
+    end
+    if is_current and state~="completed" then
+        buttons[#buttons+1]={{text="取消并保留断点",callback=function() UIManager:close(dialog); manager:cancel() end}}
+    end
+    buttons[#buttons+1]={{text="删除下载数据",callback=function()
+        UIManager:close(dialog)
+        UIManager:show(ConfirmBox:new{
+            text="删除“"..tostring(task.name or task.repo or "插件").."”的插件下载任务和断点？\n\n已安装插件不会被删除。",
+            ok_text="删除",cancel_text="取消",
+            ok_callback=function() manager:delete_data(task) end,
+        })
+    end}}
+    if state=="completed" and pending_count(plugin)>0 then
+        buttons[#buttons+1]={{text="立即重启 KOReader",callback=function()
+            UIManager:close(dialog)
+            if type(plugin._restart_koreader)=="function" then plugin:_restart_koreader("extension_download_center") end
+        end}}
+    end
+    buttons[#buttons+1]={{text="关闭",callback=function() UIManager:close(dialog) end}}
+    dialog=ButtonDialog:new{title=table.concat(rows,"\n"),title_align="center",buttons=buttons}
+    UIManager:show(dialog)
+end
+
+local function extension_download_rows(plugin)
+    local manager=extension_task(plugin)
+    local rows={}
+    for _,task in ipairs(manager:list_tasks(true)) do
+        local target=task
+        rows[#rows+1]={
+            text=tostring(target.name or target.repo or "插件"),
+            post_text=extension_task_label(target),
+            callback=function() show_extension_task_detail(plugin,target) end,
+        }
+    end
+    return rows
+end
+
+local function active_extension_status(plugin,repo)
+    local manager=extension_task(plugin)
+    local task=manager:snapshot()
+    if task and tostring(task.repo or "")==tostring(repo or "") then return extension_task_label(task) end
+    return ""
 end
 
 local function removable_plugin_copy(path)
@@ -2429,6 +2423,59 @@ local function center_about(plugin)
     )
 end
 
+local function curated_package_detail_rows(plugin,entry)
+    local package=type(entry.package)=="table" and entry.package or {}
+    local artifact=type(package.artifact)=="table" and package.artifact or {}
+    local install=type(package.install)=="table" and package.install or {}
+    local rows={
+        {text=tostring(entry.repo or ""),enabled=false},
+        {text=tostring(entry.description or "暂无简介"),enabled=false},
+    }
+    local compatibility=append_catalog_rows(rows,plugin,entry)
+    rows[#rows+1]={text="安装包",post_text=tostring(artifact.name or package.version or "已固定"),enabled=false}
+    if trim(package.version)~="" then rows[#rows+1]={text="目录版本",post_text=tostring(package.version),enabled=false} end
+    if tonumber(artifact.size) and tonumber(artifact.size)>0 then
+        rows[#rows+1]={text="下载大小",post_text=Compat.format_bytes(artifact.size),enabled=false}
+    end
+    if trim(artifact.sha256)~="" then rows[#rows+1]={text="完整性",post_text="SHA-256 已固定",enabled=false} end
+    if trim(install.dirname)~="" then rows[#rows+1]={text="安装目录",post_text=tostring(install.dirname),enabled=false} end
+    rows[#rows+1]={text="解析方式",post_text="觅阅确定性目录 · 无需安装时探测 GitHub",enabled=false}
+
+    local existing=find_managed_by_repo(plugin,tostring(entry.repo or ""))
+    if existing then
+        rows[#rows+1]={text="本机状态",post_text=installed_status_label(plugin,existing,update_state(plugin)),enabled=false}
+    end
+    local transfer=active_extension_status(plugin,tostring(entry.repo or ""))
+    if transfer~="" and transfer~="安装完成" then
+        rows[#rows+1]={text="下载任务",post_text=transfer,callback=function()
+            local task=extension_task(plugin):snapshot()
+            if task then show_extension_task_detail(plugin,task) end
+        end}
+    end
+
+    if compatibility and compatibility.installable==true and trim(artifact.url)~="" then
+        rows[#rows+1]={
+            text=existing and "重新安装目录版本" or "安装扩展",
+            post_text=tostring(package.version or ""),
+            callback=function()
+                UIManager:show(ConfirmBox:new{
+                    text=third_party_install_text(plugin,entry.repo,entry.name),
+                    ok_text=existing and "重新安装" or "安装",cancel_text="取消",
+                    ok_callback=function()
+                        install_repo(plugin,entry.repo,{
+                            name=tostring(entry.name or entry.repo),description=tostring(entry.description or ""),
+                            archived=false,default_branch="main",source_probe={installable=nil},
+                        },nil)
+                    end,
+                })
+            end,
+        }
+    elseif compatibility and compatibility.installable~=true then
+        rows[#rows+1]={text="无法自动安装",post_text=tostring(compatibility.block_reason or "当前设备不兼容"),enabled=false}
+    end
+    return rows
+end
+
 local function recommendation_entry_row(plugin,entry,installed,states)
     local post=trim(entry.recommendation)
     if entry.experimental==true then post=post~="" and (post.." · Beta") or "Beta" end
@@ -2438,6 +2485,8 @@ local function recommendation_entry_row(plugin,entry,installed,states)
     if valid_repo(entry.repo) then
         local item=installed[entry.repo]
         local status=item and installed_status_label(plugin,item,states) or ""
+        local transfer=active_extension_status(plugin,entry.repo)
+        if transfer~="" and transfer~="安装完成" then status=transfer end
         if status~="" then post=post~="" and (post.." · "..status) or status end
     end
     local target=entry
@@ -2445,7 +2494,11 @@ local function recommendation_entry_row(plugin,entry,installed,states)
         text=tostring(target.name or target.repo or target.id),post_text=post,keep_menu_open=true,
         callback=function()
             if valid_repo(target.repo) then
-                repo_detail(plugin,target.repo,target)
+                if type(target.package)=="table" then
+                    show_menu(plugin,"扩展 · "..tostring(target.name or target.id),curated_package_detail_rows(plugin,target))
+                else
+                    repo_detail(plugin,target.repo,target)
+                end
             else
                 show_menu(plugin,"扩展 · "..tostring(target.name or target.id),external_entry_rows(plugin,target))
             end
@@ -2750,6 +2803,18 @@ end
 
 function M.installed_count(plugin)
     return installed_count(plugin)
+end
+
+function M.download_rows(plugin)
+    return extension_download_rows(plugin)
+end
+
+function M.show_download_task(plugin,task)
+    return show_extension_task_detail(plugin,task)
+end
+
+function M.active_download_status(plugin,repo)
+    return active_extension_status(plugin,repo)
 end
 
 function M.menu(plugin)
