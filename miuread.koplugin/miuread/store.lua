@@ -795,6 +795,26 @@ function Store:migrate()
             logger.info("[MiuRead][Migration] schema 128 -> 129 done",
                 "extension_package_manager=v3","legacy_v2_partials=ignored","route_health=reset")
         end
+        if schema<130 then
+            -- beta.11 replaces Package Manager v3's route scoring/cross-source
+            -- partial model with the deterministic built-in extension engine v4.
+            -- Existing installed plugins are untouched; only transient v3 task
+            -- data is discarded because its partial identity rules are different.
+            local network=self.db:readSetting("extension_center_network_v2",{}) or {}
+            if type(network)~="table" then network={} end
+            self.db:saveSetting("extension_center_network_v2",{
+                mode=tostring(network.mode or "auto"),
+                custom_prefix=tostring(network.custom_prefix or ""),
+            })
+            local old_tasks=tostring(self.data_dir or "").."/extensions/tasks"
+            if old_tasks~="/extensions/tasks" then U.remove_tree(old_tasks) end
+            U.mkdir(tostring(self.data_dir or "").."/extensions")
+            U.mkdir(old_tasks)
+            self.db:saveSetting("extension_package_manager_version",4)
+            self.db:saveSetting("extension_transfer_legacy_v3","discarded_schema130")
+            logger.info("[MiuRead][Migration] schema 129 -> 130 done",
+                "extension_engine=v4","route_health=removed","cross_source_partials=removed","legacy_v3_tasks=discarded")
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
     end

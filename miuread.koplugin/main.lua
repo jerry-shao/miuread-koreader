@@ -51,7 +51,7 @@ local AnnotationSync=require("miuread.annotation_sync")
 local Downloader=require("miuread.downloader")
 local DownloadProgress=require("miuread.download_progress")
 local DownloadTask=require("miuread.download_task")
-local ExtensionTask=require("miuread.extension_task")
+local ExtensionTask=require("miuread.extension_job")
 local DownloadResult=require("miuread.download_result")
 local BookIntegrity=require("miuread.book_integrity")
 local EpubInstaller=require("miuread.epub_installer")
@@ -27898,8 +27898,9 @@ function Plugin:onResume()
         require("miuread.network_health").clear()
         HomeData.invalidate_device_state()
     end
-    -- ExtensionTask has its own 1/3/6 second stable-network gate. It never
-    -- starts a transport directly on the raw wake edge.
+    -- ExtensionTask owns a stable-network retry gate. It never starts a
+    -- transport directly on the raw wake edge, and WAIT_NETWORK can recover
+    -- without consuming every mirror.
     if self.extension_task and type(self.extension_task.on_resume)=="function" then
         pcall(self.extension_task.on_resume,self.extension_task)
     end
