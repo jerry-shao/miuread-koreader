@@ -1,16 +1,16 @@
 {
-  "version": "5.7.0-beta.2",
-  "name": "觅阅 · 微信读书助手 5.7.0-beta.2 内测版",
+  "version": "5.8.0-beta.13",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.13 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.7.0-beta.2/miuread-v5.7.0-beta.2-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.7.0-beta.2/miuread-v5.7.0-beta.2-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.7.0-beta.2/miuread-v5.7.0-beta.2-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.7.0-beta.2/miuread-v5.7.0-beta.2-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.7.0-beta.2/miuread-v5.7.0-beta.2-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip"
   ],
-  "size": 1858790,
-  "sha256": "11cb07cfa45bfa2f7435a68a65a5545efb9a322f3a37a41a57228f84ef2ba91c",
-  "notes": "修复觅阅设置快捷气泡缺少扩展入口；扩展下载增加 curl 回退，插件 ZIP 优先使用 KOReader Archiver 解压，并补充安装阶段日志与回滚诊断。"
+  "size": 1915272,
+  "sha256": "ffe3a41a59152af705562740a1681cac70343494477e7638b04f73c01ffb3a78",
+  "notes": "恢复单章节/部分章节精确整书进度同步；修复 #94 中阅读时间任务阻塞进度上传；区分未发送、已提交待确认与已确认状态，Pending 可自动恢复且不重复提交；章节版阅读时间恢复安全上报。"
 }

@@ -293,7 +293,8 @@ local function locate_single(reader, record, anchor, options)
     local words = math.max(0, tonumber(anchor.chapter_word_count) or 0)
     local total_words = math.max(0, tonumber(anchor.total_word_count) or 0)
     local words_before = math.max(0, tonumber(anchor.words_before) or 0)
-    if words <= 0 or total_words <= 0 then return nil, "catalog_word_counts_missing" end
+    -- beta.13 intentionally permits a chapter-only anchor here. Native Web
+    -- Reader `co` does not depend on whole-book word counts; only `pr` does.
 
     local coord_html, cache_hit, fetch_error, cache_meta = fetch_coord_html(reader, record, anchor, options)
     if not coord_html then return nil, fetch_error end
@@ -313,11 +314,16 @@ local function locate_single(reader, record, anchor, options)
     -- Keep the old word-space candidate only for progress/fallback diagnostics.
     -- Native Web Reader `co` is a raw source coordinate and is not bounded by
     -- chapter.wordCount.
-    local source_word_offset = math.max(0, math.min(words, math.floor(words * within + 0.5)))
-    local progress = U.clamp(((words_before + source_word_offset) / total_words) * 100, 0, 100)
+    local source_word_offset = words > 0
+        and math.max(0, math.min(words, math.floor(words * within + 0.5))) or nil
+    local progress = (words > 0 and total_words > 0)
+        and U.clamp(((words_before + source_word_offset) / total_words) * 100, 0, 100) or nil
 
     local native, native_error = WRCo.fromMap(map, located.html_boundary)
     local native_ok = type(native) == "table" and tonumber(native.co) ~= nil
+    if not native_ok and progress == nil then
+        return nil, "native_wr_co_unavailable_without_catalog"
+    end
     local offset = native_ok and math.max(0, math.floor(tonumber(native.co))) or source_word_offset
 
     return {
@@ -334,9 +340,13 @@ local function locate_single(reader, record, anchor, options)
         chapter_percent = math.floor(within * 100 + 0.5),
         chapter_ratio = within,
         summary = tostring(anchor.chapter_title or ""),
-        safe = true,
+        safe = native_ok or progress ~= nil,
+        coordinate_safe = native_ok,
+        whole_progress_available = progress ~= nil,
+        catalog_pending = progress == nil,
         precise = true,
         standalone = anchor.standalone == true,
+        partial_source = anchor.partial_source == true,
         source = native_ok and "weread_native_wr_co" or "weread_source_anchor",
         position_basis = native_ok and "wr_data_co" or "weread_source_norm_anchor",
         offset_basis = native_ok and "wr_data_co" or "weread_source_norm_anchor",

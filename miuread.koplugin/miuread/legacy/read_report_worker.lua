@@ -558,13 +558,16 @@ local function attempt_report(client, book_id, elapsed_seconds, book, progress_r
         book_id, elapsed_seconds, book, progress_ratio, time_only, position_override)
     if not payload then
         return false, nil, tostring(position_or_error or "reading position unavailable"), "position", nil,
-            {payload_fields_complete=false}
+            {payload_fields_complete=false}, {request_dispatched=false}
     end
     local referer = book.reader_url or WeRead.reader_url(book_id)
     local ok, result, code, headers = pcall(function()
         return client:report_read(payload, referer)
     end)
-    local meta={code=tonumber(code),has_headers=type(headers)=="table"}
+    -- Once report_read has been entered, the parent must conservatively assume
+    -- the interval may have reached WeRead even when the transport later throws.
+    -- Only failures before this call are safe to replay as reading-time carry.
+    local meta={code=tonumber(code),has_headers=type(headers)=="table",request_dispatched=true}
     if not ok then
         local message=tostring(result)
         local kind=Http.is_auth_error(message) and "authentication"
@@ -646,6 +649,7 @@ function Worker.run(job)
     if tostring(book.book_id or book.bookId or "")~=book_id then
         return finish(settings, book, {
             ok=false,error="book context identity mismatch",error_kind="context",
+            meta={request_dispatched=false},
         }, context_changed)
     end
     local job_core=tostring(job.core_map_hash or "")
@@ -653,6 +657,7 @@ function Worker.run(job)
     if job_core~="" and book_core~="" and job_core~=book_core then
         return finish(settings, book, {
             ok=false,error="book core map identity mismatch",error_kind="context",
+            meta={request_dispatched=false},
         }, context_changed)
     end
     if job_core~="" then book.core_map_hash=job_core end
@@ -662,6 +667,7 @@ function Worker.run(job)
             ok = false,
             error = "missing book id",
             error_kind = "context",
+            meta={request_dispatched=false},
         }, context_changed)
     end
     if not settings:is_cookie_configured() then
@@ -669,6 +675,7 @@ function Worker.run(job)
             ok = false,
             error = "cookie not configured",
             error_kind = "authentication",
+            meta={request_dispatched=false},
         }, context_changed)
     end
 
@@ -691,6 +698,7 @@ function Worker.run(job)
                 ok = false,
                 error = message,
                 error_kind = kind,
+                meta={request_dispatched=false},
             }, context_changed)
         end
         book = context_or_error
@@ -708,6 +716,7 @@ function Worker.run(job)
             response_summary = "reader context and full catalog ready",
             path = "context_only",
             payload_public = { context_only = true, payload_fields_complete = false },
+            meta={request_dispatched=false},
         }, true)
     end
 
@@ -726,6 +735,7 @@ function Worker.run(job)
         if not position_override then
             return finish(settings, book, {
                 ok=false,error="cloud reading position unavailable for reading-time report",error_kind="context",
+                meta={request_dispatched=false},
             }, context_changed)
         end
     end

@@ -149,6 +149,7 @@ function Adapter.run(job)
             context_only = job.context_only == true,
             report_mode = tostring(job.report_mode or ""),
         }, result.payload_public or {}),
+        request_dispatched = type(result.meta)=="table" and result.meta.request_dispatched==true,
         meta = result.meta,
     }
 end

@@ -954,6 +954,89 @@ function Store:migrate()
                 "session_context=v2","fields_removed=",tostring(removed),
                 "catalogs_promoted=",tostring(promoted))
         end
+        if schema<132 then
+            local BookIntegrity=require("miuread.book_integrity")
+            -- beta.13 restores the standalone/partial progress contract without
+            -- loosening full-book safety. Legacy beta.14-17 records often have
+            -- a correct whole-book catalog + catalog hash but a wrong selected
+            -- chapter count. Promote only when the hash proves identity and the
+            -- stored catalog is larger than the local partial selection. A real
+            -- one-chapter whole book stays ambiguous until remotely confirmed.
+            local library=self.db:readSetting("library",{}) or {}
+            local sessions=self.db:readSetting("sessions",{}) or {}
+            local promoted_catalogs,normalized_pending,partial_time_enabled=0,0,0
+            for id,book in pairs(type(library)=="table" and library or {}) do
+                if type(book)=="table" and book.catalog_complete~=true
+                    and type(book.catalog)=="table" and #book.catalog>0
+                    and tostring(book.core_catalog_hash or "")~="" then
+                    local actual=BookIntegrity.core_map_hash(tostring(id),book.catalog,{})
+                    if actual~="" and actual==tostring(book.core_catalog_hash or "") then
+                        local partial_readable=0
+                        local function consider(row)
+                            if type(row)~="table" then return end
+                            local local_map=type(row.chapter_map)=="table" and row.chapter_map or {}
+                            local readable=0
+                            for _,chapter in ipairs(local_map) do
+                                local uid=tostring(chapter and (chapter.uid or chapter.chapterUid or chapter.chapter_uid) or "")
+                                if uid~="" and chapter.structural~=true then readable=readable+1 end
+                            end
+                            local explicit=tostring(row.chapter_uid or "")~="" and readable<=1
+                            if explicit or row.partial_range==true then partial_readable=math.max(partial_readable,readable) end
+                        end
+                        for _,row in pairs(type(book.variants)=="table" and book.variants or {}) do consider(row) end
+                        for _,chapter_rows in pairs(type(book.chapters)=="table" and book.chapters or {}) do
+                            for _,row in pairs(type(chapter_rows)=="table" and chapter_rows or {}) do consider(row) end
+                        end
+                        if partial_readable>0 and #book.catalog>partial_readable then
+                            book.catalog_complete=true
+                            book.catalog_chapter_count=#book.catalog
+                            book.catalog_recovered_at=os.time()
+                            book.catalog_recovered_source="schema132_hash_verified"
+                            promoted_catalogs=promoted_catalogs+1
+                        end
+                    end
+                end
+                -- Reading-time-only reporting no longer uses partial EPUB ratio.
+                -- Normalize old range-download metadata that disabled it solely
+                -- because the historical reporter coupled rt and progress.
+                local function enable_partial_time(row)
+                    if type(row)=="table" and row.partial_range==true and row.sync_enabled~=false
+                        and row.progress_sync_enabled~=false and row.read_report_enabled~=true then
+                        row.read_report_enabled=true
+                        partial_time_enabled=partial_time_enabled+1
+                    end
+                end
+                for _,row in pairs(type(book.variants)=="table" and book.variants or {}) do enable_partial_time(row) end
+                for _,chapter_rows in pairs(type(book.chapters)=="table" and book.chapters or {}) do
+                    for _,row in pairs(type(chapter_rows)=="table" and chapter_rows or {}) do enable_partial_time(row) end
+                end
+            end
+            for _,session in pairs(type(sessions)=="table" and sessions or {}) do
+                if type(session)=="table" then
+                    local state=tostring(session.progress_upload_state or "")
+                    if state=="unconfirmed" then
+                        local pending=type(session.pending_progress)=="table" and session.pending_progress or {}
+                        local submitted_at=tonumber(session.progress_upload_submitted_at or session.progress_upload_at
+                            or pending.submitted_at or 0) or 0
+                        session.progress_upload_state=submitted_at>0 and "submitted" or "pending_send"
+                        if submitted_at>0 then session.progress_upload_submitted_at=submitted_at end
+                        normalized_pending=normalized_pending+1
+                    end
+                    -- Old reading-time debt has no proof whether its HTTP request
+                    -- was dispatched. Never replay it after OTA. beta.13 writes
+                    -- the safe marker only for future definitely-unsent seconds.
+                    if tonumber(session.pending_report_seconds or 0)>0 then session.pending_report_seconds=0 end
+                    session.pending_report_safe=false
+                end
+            end
+            self.db:saveSetting("library",library)
+            self.db:saveSetting("sessions",sessions)
+            logger.info("[MiuRead][Migration] schema 131 -> 132 done",
+                "partial_catalogs_promoted=",tostring(promoted_catalogs),
+                "partial_time_enabled=",tostring(partial_time_enabled),
+                "pending_states_normalized=",tostring(normalized_pending),
+                "legacy_time_debt_replayed=false")
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
     end
@@ -1815,13 +1898,14 @@ function Store:invalidate_book_sync_context(id,reason,core_map_hash)
         "legacy_report_context","report_context","report_login_session_id","report_core_map_hash",
         "remote_verified","verified_at","verified_reason","verified_local_percent","verified_remote_percent",
         "verification_login_session_id","progress_upload_state","progress_upload_verified_at","progress_upload_source",
-        "pending_progress","progress_upload_error","progress_upload_pending_at",
-        "pending_report_seconds"
+        "pending_progress","pending_progress_coordinate","progress_upload_error","progress_upload_pending_at",
+        "progress_upload_submitted_at","pending_report_seconds","pending_report_safe"
     }) do row[field]=nil end
     row.sync_context_invalidated_at=os.time()
     row.sync_context_invalidated_reason=tostring(reason or "book_context_changed")
     row.book_core_map_hash=tostring(core_map_hash or row.book_core_map_hash or "")
     row.pending_report_seconds=0
+    row.pending_report_safe=false
     sessions[key]=row
     self.db:saveSetting("sessions",sessions)
     self:flush()
@@ -1945,9 +2029,9 @@ function Store:mark_read_report_consumed(stamp)
     self:set("read_report_consumed",rows)
 end
 local PROGRESS_SESSION_FIELDS={
-    "pending_progress","progress_latest_sequence","progress_verified_sequence",
+    "pending_progress","pending_progress_coordinate","progress_latest_sequence","progress_verified_sequence",
     "progress_sync_state","progress_sync_message","progress_local_percent","progress_remote_percent","progress_decided_at",
-    "progress_upload_state","progress_upload_error","progress_upload_pending_at","progress_upload_verified_at",
+    "progress_upload_state","progress_upload_error","progress_upload_pending_at","progress_upload_submitted_at","progress_upload_verified_at",
     "progress_upload_source","progress_upload_at","progress_upload_percent","progress_upload_chapter_uid",
     "progress_upload_co","progress_upload_remote_co","progress_worker_active","progress_worker_updated_at",
 }
@@ -1955,10 +2039,12 @@ local PROGRESS_SESSION_FIELDS={
 local function progress_session_sequence(row)
     row=type(row)=="table" and row or {}
     local pending=type(row.pending_progress)=="table" and row.pending_progress or {}
+    local coordinate=type(row.pending_progress_coordinate)=="table" and row.pending_progress_coordinate or {}
     return math.max(
         tonumber(row.progress_latest_sequence or 0) or 0,
         tonumber(row.progress_verified_sequence or 0) or 0,
-        tonumber(pending.progress_sequence or 0) or 0
+        tonumber(pending.progress_sequence or 0) or 0,
+        tonumber(coordinate.progress_sequence or 0) or 0
     )
 end
 

@@ -1,7 +1,7 @@
 local TOOL_DIR=tostring(arg and arg[0] or ''):match('^(.*)/[^/]+$') or '.'
 local SRC_ROOT=TOOL_DIR..'/..'
 local ROOT=SRC_ROOT..'/miuread.koplugin/'
-local TMP=(os.getenv('TMPDIR') or '/tmp')..'/miuread-beta12-store-repair'
+local TMP=(os.getenv('TMPDIR') or '/tmp')..'/miuread-beta13-store-repair'
 package.path=ROOT..'?.lua;'..package.path
 os.execute('rm -rf '..string.format('%q',TMP)); os.execute('mkdir -p '..string.format('%q',TMP))
 
@@ -54,10 +54,20 @@ package.preload['luasettings']=function()
 end
 package.preload['dump']=function() return function(v) return dump_table(v) end end
 package.preload['miuread.config']=function()
-    return {SCHEMA=131,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.12',
+    return {SCHEMA=132,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.13',
         UPDATE_MANIFEST='',AUTO_UPDATE_INTERVAL=1,READ_INTERVAL=60,IDLE_TIMEOUT=60,REMOTE_THRESHOLD=3}
 end
 package.preload['miuread.json']=function() return {encode=function() return '{}' end,decode=function() return {} end} end
+
+package.preload['miuread.book_integrity']=function()
+    return {core_map_hash=function(book_id,map)
+        local parts={tostring(book_id or '')}
+        for _,row in ipairs(type(map)=='table' and map or {}) do
+            parts[#parts+1]=table.concat({tostring(row.uid or row.chapterUid or row.chapter_uid or ''),tostring(row.index or row.chapterIdx or row.chapter_idx or ''),tostring(row.word_count or row.wordCount or 0)},':')
+        end
+        return table.concat(parts,'|')
+    end}
+end
 package.preload['miuread.download_database']=function()
     return {runtime_path=function(d) return d..'/download-runtime.json' end,get_download_state=function() return nil end,
         clear_download_state=function() return true end,set_download_state=function() return true end,get_download_queue=function() return {} end,set_download_queue=function() return true end}
@@ -87,12 +97,19 @@ for i=1,320 do chapters[i]={uid='u'..i,index=i,title='chapter '..i,word_count=20
 local deep={leaf=true}; for i=1,260 do deep={next=deep} end
 SEED={
     schema=130,
-    library={book1={book_id='book1',catalog=copy(chapters),catalog_complete=true,variants={}}},
-    sessions={book1={
-        chapters=copy(chapters),psvts='p',token='t',pending_progress={chapter_uid='u8',canonical_offset=33,progress=5,safe=true},
-        legacy_report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),psvts='p',token='t',junk=deep},
-        report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),reader_url='https://example',junk=deep},
-    }},
+    library={
+        book1={book_id='book1',catalog=copy(chapters),catalog_complete=true,variants={}},
+        book2={book_id='book2',catalog={{uid='a',index=1,word_count=1000},{uid='b',index=2,word_count=2000}},catalog_complete=false,
+            core_catalog_hash='book2|a:1:1000|b:2:2000',variants={clean={partial_range=true,sync_enabled=true,progress_sync_enabled=true,read_report_enabled=false,chapter_map={{uid='b',index=2,word_count=2000}}}}},
+    },
+    sessions={
+        book1={
+            chapters=copy(chapters),psvts='p',token='t',pending_progress={chapter_uid='u8',canonical_offset=33,progress=5,safe=true},
+            legacy_report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),psvts='p',token='t',junk=deep},
+            report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),reader_url='https://example',junk=deep},
+        },
+        book2={progress_upload_state='unconfirmed',progress_upload_at=os.time()-5,pending_progress={chapter_uid='b',canonical_offset=100,progress=75,safe=true},pending_report_seconds=50},
+    },
 }
 
 local Store=require('miuread.store')
@@ -111,6 +128,12 @@ st:save_session('book1',{chapters=copy(chapters),legacy_report_context={book_id=
 row=assert(st:session('book1'))
 assert(row.chapters==nil and row.legacy_report_context.chapters==nil,'save_session reintroduced duplicate chapter catalogs')
 assert(row.legacy_report_context.psvts=='new','sanitizer removed a required context field')
+local b2=assert(st:get('library',{}).book2)
+assert(b2.catalog_complete==true and b2.catalog_chapter_count==2,'schema132 did not promote hash-verified partial catalog')
+assert(b2.variants.clean.read_report_enabled==true,'schema132 did not re-enable safe time-only report for partial EPUB')
+local s2=assert(st:session('book2'))
+assert(s2.progress_upload_state=='submitted','legacy unconfirmed progress was not normalized to submitted')
+assert((tonumber(s2.pending_report_seconds) or 0)==0 and s2.pending_report_safe==false,'legacy uncertain reading-time debt was replayable after migration')
 local loader,err=loadfile(TMP..'/settings.lua'); assert(loader,err)
 local ok,data=pcall(loader); assert(ok and type(data)=='table','compacted settings file is not valid Lua')
-print('store session compaction + schema131 repair: PASS')
+print('store session compaction + schema132 progress migration: PASS')

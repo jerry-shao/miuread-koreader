@@ -1,7 +1,7 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.8.0-beta.12",
-    SCHEMA = 131,
+    VERSION = "5.8.0-beta.13",
+    SCHEMA = 132,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
     DATA_DIR = "miuread",
@@ -84,6 +84,11 @@ local C = {
     -- reports stay on the established one-minute cadence and every request is
     -- independently capped, avoiding burst uploads after reconnect/resume.
     READ_REPORT_MAX_ELAPSED_SECONDS = 60,
+    -- beta.13: progress writes have priority over periodic reading-time writes.
+    -- The fence is a soft preemption: an already-dispatched time request is
+    -- allowed to return, but no new time request may start while progress waits.
+    PROGRESS_WRITER_SOFT_NOTICE_SECONDS = 4,
+    PROGRESS_WRITER_MAX_WAIT_SECONDS = 115,
     IDLE_TIMEOUT = 600,
     REMOTE_THRESHOLD = 2,
 
