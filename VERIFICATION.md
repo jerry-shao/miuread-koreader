@@ -1,6 +1,6 @@
-# 5.8.0-beta.15 verification
+# 5.8.0-beta.16 verification
 
-Scope: rebuild extension package resolution and large-file transport so slow GitHub downloads can finish without changing package identity, while giving critical reading-data cloud writes priority over background book/plugin downloads. Keep beta.13 exact-position math and beta.14 public-account navigation unchanged.
+Scope: fix #102 by making ReaderUI and FileManager share one live foreground Store for the same settings/data identity, while preserving isolated download-worker state, directory repair, beta.15 extension transport/cloud-write priority, beta.13 exact-position math, and beta.14 public-account navigation.
 
 ## Extension package identity
 
@@ -50,9 +50,18 @@ Scope: rebuild extension package resolution and large-file transport so slow Git
 - Only transfers paused by the critical lane are resumed when the lane is released.
 - ReadReport v28 writer-fence / uncertainty rules remain intact: an unknown reading-time request is not killed and blindly replayed.
 
+## Shared foreground Store (#102)
+
+- ReaderUI and FileManager reuse one non-isolated Store when both the settings path and data directory match.
+- Local-library root changes, scan caches, deferred preferences and reloads are immediately visible from either interface.
+- `isolated=true` workers are never entered into the shared Store registry.
+- Runtime directories are still checked/recreated before a shared Store is returned.
+- A later unrelated Home preference flush cannot resurrect an older pending progress state after a newer verified progress state has already reached disk.
+- Failed settings writes recover the shared live Store from the last valid on-disk state.
+
 ## Regression boundary
 
-beta.15 intentionally keeps schema **132**, ReadReport **v28**, and does not replace:
+beta.16 intentionally keeps schema **132**, ReadReport **v28**, and does not replace:
 
 - beta.13 standalone/partial EPUB whole-book conversion and exact WeRead `chapter + co` encoding;
 - beta.14 public-account shelf/account/article separation and Reader return/prev/next navigation;
@@ -62,7 +71,7 @@ beta.15 intentionally keeps schema **132**, ReadReport **v28**, and does not rep
 
 ## Automated verification
 
-- `python tools/verify_beta15.py`: **152/152 passed**.
+- `python tools/verify_beta16.py`: **156/156 passed**.
 - Shipped Lua syntax: **136/136 passed** using `texluac -p`.
 - Dynamic extension catalog selection/source-fallback regression: PASS.
 - Dynamic extension download integrity/route-identity regression: PASS.
@@ -72,6 +81,7 @@ beta.15 intentionally keeps schema **132**, ReadReport **v28**, and does not rep
 - beta.13 exact partial/standalone progress regression checks: PASS.
 - beta.14 #93/#97 regression checks: PASS.
 - beta.15 cloud-write/download-priority invariants: PASS.
+- beta.16 shared-Store/local-library/progress-freshness invariants: PASS.
 
 ## Real-device/network validation still required before stable promotion
 

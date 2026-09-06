@@ -20,8 +20,11 @@ def sha256(p):
 cfg=text(MIU/'config.lua'); main=text(PLUGIN/'main.lua'); store=text(MIU/'store.lua')
 dl=text(MIU/'extension_download.lua'); ins=text(MIU/'extension_install.lua'); job=text(MIU/'extension_job.lua'); center=text(MIU/'extension_center.lua'); catalog=text(MIU/'extension_catalog.lua')
 
-ok('VERSION = "5.8.0-beta.15"' in cfg,'version is 5.8.0-beta.15')
+ok('VERSION = "5.8.0-beta.16"' in cfg,'version is 5.8.0-beta.16')
 ok('SCHEMA = 132' in cfg,'schema is 132')
+ok('local shared_stores=setmetatable({},{__mode="v"})' in store,'beta.16 shares the live foreground Store with weak references')
+ok('if options.isolated~=true and shared_stores[shared_key] then' in store,'beta.16 reuses only non-isolated Store instances')
+ok('U.mkdir(data); U.mkdir(data.."/books")' in store and store.find('U.mkdir(data)') < store.find('if options.isolated~=true and shared_stores[shared_key] then'),'beta.16 preserves directory repair before shared Store reuse')
 for old in ['extension_transfer.lua','extension_verifier.lua','extension_package.lua','extension_installer.lua','extension_task.lua']:
     ok(not (MIU/old).exists(),f'legacy module removed: {old}')
 for new in ['extension_download.lua','extension_install.lua','extension_job.lua']:
@@ -119,7 +122,7 @@ ok('os.execute(' not in wifi_slice,'MiuRead Wi-Fi recovery does not execute netw
 sync=text(MIU/'sync.lua'); source_pos=text(MIU/'source_position.lua'); precise=text(MIU/'precise_position.lua')
 service=text(MIU/'read_report_service.lua'); legacy=text(MIU/'legacy'/'read_report_worker.lua')
 meta=text(PLUGIN/'_meta.lua')
-ok('version = "5.8.0-beta.15"' in meta,'plugin metadata version is beta.15')
+ok('version = "5.8.0-beta.16"' in meta,'plugin metadata version is beta.16')
 ok('if schema<132' in store and 'partial_catalogs_promoted' in store,'schema 132 migrates partial catalog trust safely')
 ok('schema132_hash_verified' in store and 'core_map_hash' in store,'legacy partial catalog promotion is hash-gated')
 ok('read_report_enabled=true' in downloader and 'read_report_enabled=not partial_range' not in downloader,'new partial downloads keep time-only reporting enabled')

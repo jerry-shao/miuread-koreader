@@ -320,12 +320,14 @@ end
 function Store:new(options)
     options=options or {}
     local data=options.data_dir or (DataStorage:getFullDataDir().."/"..Config.DATA_DIR)
+    -- Preserve Store:new()'s historical directory-repair guarantee even when
+    -- ReaderUI/FileManager reuse the same live Store instance.
+    U.mkdir(data); U.mkdir(data.."/books"); U.mkdir(data.."/mp"); U.mkdir(data.."/covers"); U.mkdir(data.."/temp"); U.mkdir(data.."/updates"); U.mkdir(data.."/prefetch")
     local settings_path=options.settings_path or (DataStorage:getSettingsDir().."/miuread.lua")
     local shared_key=settings_path.."\0"..data
     if options.isolated~=true and shared_stores[shared_key] then
         return shared_stores[shared_key]
     end
-    U.mkdir(data); U.mkdir(data.."/books"); U.mkdir(data.."/mp"); U.mkdir(data.."/covers"); U.mkdir(data.."/temp"); U.mkdir(data.."/updates"); U.mkdir(data.."/prefetch")
     local settings_backup_path=settings_path..".miuread-backup"
     local restored_settings_source=nil
     if options.isolated~=true then

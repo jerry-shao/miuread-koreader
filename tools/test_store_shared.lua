@@ -85,9 +85,14 @@ local function run()
     local Store=require('miuread.store')
     local options={settings_path=path,data_dir=TMP..'/data'}
     -- Reader and the concealed FileManager each initialize the plugin before
-    -- the user confirms a local-library root in one of their menus.
+    -- the user confirms a local-library root in one of their menus. Reusing a
+    -- live Store must still repair runtime directories if one disappeared.
     local reader=Store:new(options)
+    os.execute('rm -rf '..quote(options.data_dir..'/prefetch'))
     local home=Store:new(options)
+    assert(reader==home,'Reader and Home did not reuse the live Store')
+    assert(attributes(options.data_dir..'/prefetch','mode')=='directory',
+        'shared Store reuse skipped runtime directory repair')
     local prefs=reader:preferences()
     prefs.home_ui.local_entry_root='/mnt/us/documents'
     prefs.home_ui.local_entry_user_set=true
@@ -117,6 +122,31 @@ local function run()
     assert(home:preferences().home_ui.local_entry_root=='/mnt/us/Other',
         'reload left another plugin instance on stale settings')
 
+    -- A newer verified progress state written to disk must beat an older live
+    -- pending snapshot when Home later flushes an unrelated preference.
+    reader:set_deferred('sessions',{['book-progress']={
+        pending_progress={progress_sequence=7},
+        progress_latest_sequence=7,progress_verified_sequence=0,
+        progress_upload_state='submitted',progress_upload_pending_at=100,
+    }})
+    local external=loadfile(path)()
+    external.sessions={['book-progress']={
+        pending_progress=false,progress_latest_sequence=7,
+        progress_verified_sequence=7,progress_upload_state='verified',
+        progress_upload_verified_at=200,
+    }}
+    assert(write(path,'return '..dump(external)))
+    prefs=home:preferences()
+    prefs.home_ui.more_expanded=not prefs.home_ui.more_expanded
+    assert(home:save_preferences(prefs))
+    local progress_saved=loadfile(path)().sessions['book-progress']
+    assert(progress_saved.progress_verified_sequence==7,
+        'Home preference flush rolled verified progress back to an older state')
+    assert(progress_saved.progress_upload_state=='verified',
+        'Home preference flush lost the verified progress terminal state')
+    assert(progress_saved.pending_progress==false,
+        'Home preference flush resurrected an already verified pending upload')
+
     local isolated_options={settings_path=path,data_dir=options.data_dir,isolated=true}
     local isolated=Store:new(isolated_options)
     isolated:set_deferred('test_isolated',true)
@@ -132,7 +162,7 @@ local function run()
     fail_write=false
     assert(reader:preferences().home_ui.local_entry_root=='/mnt/us/Other',
         'failed-write recovery did not reach all plugin instances')
-    print('shared Store: local root, scan visibility, deferred save, reload, isolation and recovery: PASS')
+    print('shared Store: local root, directory repair, scan visibility, progress freshness, deferred save, reload, isolation and recovery: PASS')
 end
 local ok,err=xpcall(run,debug.traceback)
 os.execute('rm -rf '..quote(TMP))
