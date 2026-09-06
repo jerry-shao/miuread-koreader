@@ -1,84 +1,76 @@
-# 5.8.0-beta.13 verification
+# 5.8.0-beta.14 verification
 
-Scope: restore standalone/partial EPUB whole-book progress synchronization, fix #94 progress-vs-reading-time writer contention, make progress persistence dispatch-aware, and keep the already-stable beta.12 full-book/Reader behavior unchanged.
+Scope: close the #93 public-account navigation regression and the #97 KPW5 Home/read-report/progress/network-state regressions without changing the beta.13 chapter/partial-book progress algorithm, downloader, extension installer, OTA flow, or KOReader native Reader plumbing.
 
-## Standalone / partial progress regression
+## #93 — public-account navigation
 
-Implemented safeguards:
+- Home quick actions include **公众号** by default; the action layout supports seven visible items and preserves user customization.
+- `书架 → 公众号` is populated from WeRead public-account rows, even when no public-account article has been cached locally.
+- `本机 → 公众号` remains local cached public-account articles; account collections and local articles are not conflated.
+- Selecting the public-account source with no cached account list requests one refresh while retaining any previous cache on failure.
+- A public-account article opened in Reader routes `更多` to the public-account reader menu first, exposing `返回文章列表 / 上一篇 / 下一篇 / 当前文章 / 全部阅读功能`.
+- `返回文章列表` returns to the current public account's article list.
 
-- A standalone or partial EPUB can capture the exact WeRead native `chapter + co` coordinate before a trusted whole-book catalog is available. Whole-book `progress` is completed later from the verified catalog; the local partial EPUB percentage is never uploaded as whole-book progress.
-- New partial downloads keep the complete WeRead catalog separate from the selected local chapters and keep time-only read reporting enabled.
-- Schema **132** safely promotes legacy partial catalogs only when the stored `core_catalog_hash` matches the actual catalog and the catalog is larger than the local partial selection. An ambiguous one-chapter catalog is not auto-promoted; it must be remotely confirmed once.
-- Missing/untrusted catalogs are recovered through the existing WeRead context path and then persisted with explicit `catalog_complete`, `catalog_chapter_count`, and `core_catalog_hash` metadata.
-- Manual progress, Reader close, Home return, and suspend/finalizer paths preserve `pending_progress_coordinate` when exact chapter/co is available but whole-book percentage is not yet ready. Home recovery later completes the percentage and continues the same durable transaction.
+## #97 — Home interaction and refresh semantics
 
-## #94 — progress writer vs reading-time writer
+- Single-click Home refresh never opens the local-library folder chooser. An unconfigured local library shows a message instead; folder selection remains an explicit settings/file-management action.
+- The Sync quick action no longer displays a fixed “submitted” notice. Its visible state is produced by the real pending/sync state.
+- On low-memory devices, direct user interaction can cancel optional Home metadata/cover work in addition to statistics/shelf-summary work. Downloads and actual sync transactions are not cancelled by this rule.
 
-- Progress writes now place a soft fence in front of the periodic reading-time service. No new time request can start while progress is waiting.
-- An already-dispatched time request is never forcibly killed/replayed. The progress fence waits for that request to return, then takes ownership of `/web/book/read`; the previous hard 15-second `progress_writer_busy` failure path is no longer the normal contention behavior.
-- The maximum soft wait is bounded at 115 seconds, longer than the compatibility worker's request timeout. If the writer still cannot be acquired, the exact progress snapshot remains durable and is classified as definitely unsent rather than being discarded.
+## #97 — Wi-Fi state consistency
 
-## Dispatch-aware pending state
+- A real NetworkManager association with a Kindle SSID immediately exits stale `recovering` presentation state.
+- Association state and Internet reachability remain separate, so an associated network can be shown correctly even while Internet probing is still pending/failing.
+- Home and Reader therefore no longer intentionally disagree merely because the previous recovery phase has not timed out.
 
-Progress is persisted as one of three effective transport states:
+## #97 — read-report worker health
 
-- `pending_send`: the request is definitely unsent and may be resumed automatically.
-- `submitted`: the request was sent, or dispatch outcome is uncertain; recovery performs cloud readback only and does **not** replay the same position.
-- `verified`: cloud chapter/co has confirmed the submitted position; pending state is cleared.
+- Read-report service version is **28**.
+- The child service writes a lightweight heartbeat outside blocking WeRead report calls.
+- The parent distinguishes startup grace, idle-stall timeout, and legitimate in-flight HTTP reporting timeout.
+- A living-but-stalled service is retired and restarted automatically, with a bounded number of automatic restarts.
+- Restart does **not** replay an interval whose network dispatch outcome is unknown.
+- Writer-barrier callers receive a cancellation result when a stuck service is restarted, so they cannot remain blocked on a dead generation.
 
-Cloud confirmation latency, old position readback, or temporary `0/0` does not erase the local exact position. The latest exact position for a book supersedes older pending positions.
+## #97 — progress priority and conflict persistence
 
-## Reading-time safety for chapter downloads
+- The exact final `chapter + co` position is persisted locally before network-dependent finalization.
+- Reading-end gives an already-running reading-time writer only a short **4-second** handoff window. If it is still busy, progress is parked durably for later recovery instead of blocking suspend/Home for tens of seconds or writing concurrently.
+- The foreground progress writer fence is bounded to **8 seconds**; an uncertain in-flight reading-time request is never killed and blindly replayed.
+- Choosing **使用本机位置** stores an exact-position fingerprint. The same unresolved local position resumes its saved upload/verification transaction after resume rather than showing the same cloud-conflict question again.
+- A genuinely new local position, a remote-position choice, or successful cloud verification clears/replaces that remembered decision as appropriate.
 
-- Historical `partial_range` downloads are migrated from `read_report_enabled=false` to safe time-only reporting when normal sync remains enabled.
-- Time-only reporting repeats an already safe cloud position; it does not submit the local partial-document percentage.
-- The service carries forward only seconds that are **provably unsent**. Once `/web/book/read` has been entered, the attempted interval is never replayed merely because the response was lost.
-- Legacy pending reading-time debt from older builds has no dispatch proof and is therefore cleared during schema-132 migration instead of being replayed and potentially double-counted.
+## Regression boundary
 
-## Normal full-book / Reader regression boundary
+beta.14 intentionally keeps schema **132** and does not replace:
 
-Source-level function comparison against the supplied 5.8.0-beta.12 source passed **11/11** unchanged core functions:
-
-- `Sync:position`
-- `Sync:local_position`
-- `Sync:_prefer_inverse_cloud_mapping`
-- `Plugin:_remote_matches`
-- `Plugin:_verify_progress_submission`
-- `Plugin:onReaderReady`
-- `Plugin:onCloseDocument`
-- `Plugin:onResume`
-- `Plugin:onSuspend`
-- `Plugin:_begin_koreader_exit`
-- `Plugin:_quiesce_download_for_exit`
-
-Therefore beta.13 does not replace the existing full-book position algorithm, cloud matching/verification algorithm, KOReader Reader lifecycle, CRE handling, input handling, or native Exit/Restart download quiesce path. #87/#90 remain real-device regression items rather than another speculative Reader rewrite.
+- beta.13 standalone/partial EPUB whole-book progress conversion;
+- exact WeRead `chapter + co` encoding/verification;
+- download/extension installation transactions;
+- Kindle/Kobo background download implementation;
+- OTA/update transport;
+- KOReader native typography/CRE/input behavior.
 
 ## Automated verification
 
-- `python tools/verify_beta13.py`: **100/100 passed**.
+- `python tools/verify_beta14.py`: **120/120 passed**.
 - Shipped Lua syntax: **136/136 passed** using `texluac -p`.
-- Extension catalog regression: PASS — 18 deterministic packages.
+- Extension catalog regression: PASS.
 - Extension download fault model: PASS.
 - Extension installer transaction/rollback/path-safety model: PASS.
-- Store migration/compaction regression: PASS, including schema-132 partial catalog promotion, old partial read-report enablement, pending progress normalization, and non-replay of ambiguous legacy reading-time debt.
-- Standalone/partial whole-book fault model: PASS.
-- Progress transport state model (`pending_send` / `submitted` / `verified`): PASS.
+- Store migration/compaction regression: PASS.
+- beta.13 partial/standalone progress regression checks: PASS.
+- #93 Home/account/Reader navigation checks: PASS.
+- #97 refresh/Wi-Fi/read-report-health/progress-priority/conflict-persistence checks: PASS.
 
-## Hardware validation still required
+## Real-device validation still required
 
-Source/fault-model checks cannot emulate WeRead response timing, Kindle process scheduling, or KOReader input-device failure. Before stable promotion, real-device validation should cover:
+Static, syntax, and deterministic regression tests cannot emulate Kindle scheduling, Wi-Fi firmware behavior, or WeRead server timing. Before stable promotion, KPW5/KPW6 real-device verification should cover:
 
-1. **Standalone chapter:** download one chapter, read to several positions, manually upload, return Home, close/suspend, and verify the phone/Web WeRead location follows the same chapter and approximate text position.
-2. **Legacy standalone chapter:** upgrade without redownloading; verify a hash-valid stored whole-book catalog is promoted and progress resumes automatically.
-3. **Catalog recovery:** force/remove trusted catalog metadata while keeping a partial EPUB; verify exact chapter/co is retained first, the full catalog is recovered later, and the same pending transaction continues.
-4. **#94:** trigger manual/end-of-reading progress while the reading-time service is actively writing. There must be no lost local position and no automatic replay of a request whose dispatch is uncertain.
-5. **#87/#90:** KPW4/KPW5 open → page-turn → suspend/resume → Home. Confirm no regression in Reader rebuild/white-screen behavior; if `Broken pipe` recurs, capture a fresh beta.13 log because beta.13 intentionally does not modify KOReader's input subsystem.
-
-## Built beta package
-
-- Full install ZIP: `miuread-v5.8.0-beta.13-full.zip`
-- Size: **1,915,272 bytes**
-- SHA-256: `ffe3a41a59152af705562740a1681cac70343494477e7638b04f73c01ffb3a78`
-- Runtime ZIP entries: **236**, all under `miuread.koplugin/`.
-- Python `ZipFile.testzip()` and `unzip -t` both pass.
-- `update.json` version/size/SHA match the generated full ZIP.
+1. Home → 公众号 → account → article → Reader → 返回文章列表.
+2. An account with zero locally cached articles still appears in `书架 → 公众号`; `本机 → 公众号` remains empty until an article is cached.
+3. KPW5 continuous reading for at least two hours, then Home/suspend; compare WeRead reading time and final cloud location.
+4. Force/observe a slow read-report call; Home/suspend must not wait tens of seconds, and the final exact position must recover later without duplicate time replay.
+5. Choose local progress once during a conflict, suspend/resume before cloud confirmation, and verify the same exact position is not prompted again.
+6. Resume Wi-Fi on KPW5/KPW6: once SSID association is visible, Home must stop showing `恢复中`.
+7. On an unconfigured local library, tap refresh: it must not open a directory chooser.

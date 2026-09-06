@@ -1,16 +1,17 @@
 {
-  "version": "5.8.0-beta.13",
-  "name": "觅阅 · 微信读书助手 5.8.0-beta.13 内测版",
+  "version": "5.8.0-beta.14",
+  "name": "\u89c5\u9605 \u00b7 \u5fae\u4fe1\u8bfb\u4e66\u52a9\u624b 5.8.0-beta.14 \u5185\u6d4b\u7248",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.14/miuread-v5.8.0-beta.14-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.13/miuread-v5.8.0-beta.13-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.14/miuread-v5.8.0-beta.14-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.14/miuread-v5.8.0-beta.14-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.14/miuread-v5.8.0-beta.14-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.14/miuread-v5.8.0-beta.14-full.zip"
   ],
-  "size": 1915272,
-  "sha256": "ffe3a41a59152af705562740a1681cac70343494477e7638b04f73c01ffb3a78",
-  "notes": "恢复单章节/部分章节精确整书进度同步；修复 #94 中阅读时间任务阻塞进度上传；区分未发送、已提交待确认与已确认状态，Pending 可自动恢复且不重复提交；章节版阅读时间恢复安全上报。"
+  "size": 1928529,
+  "sha256": "6d5dfcb9b5bb043aca41315f5d83a5b1484d94878d9bd0dbcc1abdcc2aa4a130",
+  "summary": "\u4fee\u590d #93\uff1a\u6062\u590d\u4e3b\u9875\u516c\u4f17\u53f7\u5feb\u6377\u5165\u53e3\uff0c\u4e66\u67b6\u6309\u516c\u4f17\u53f7\u8d26\u53f7\u5c55\u793a\u3001\u4e0e\u672c\u673a\u7f13\u5b58\u6587\u7ae0\u5206\u79bb\uff0c\u5e76\u6062\u590d\u9605\u8bfb\u6587\u7ae0\u540e\u8fd4\u56de\u5f53\u524d\u516c\u4f17\u53f7\u5217\u8868\uff1b\u4fee\u590d #97\uff1a\u9605\u8bfb\u65f6\u95f4\u540e\u53f0\u670d\u52a1\u589e\u52a0\u5361\u6b7b\u68c0\u6d4b\u4e0e\u81ea\u52a8\u6062\u590d\uff0c\u6700\u7ec8\u9605\u8bfb\u8fdb\u5ea6\u4f18\u5148\u4e14\u4e0d\u518d\u88ab\u65f6\u95f4\u5199\u5165\u957f\u65f6\u95f4\u963b\u585e\uff0c\u540c\u4e00\u7b14\u672c\u673a\u8fdb\u5ea6\u9009\u62e9\u4e0d\u91cd\u590d\u8be2\u95ee\uff1b\u7edf\u4e00 Wi-Fi \u6062\u590d\u72b6\u6001\uff0c\u5237\u65b0\u4e0d\u518d\u8bef\u5165\u672c\u5730\u4e66\u76ee\u5f55\uff0c\u5e76\u52a0\u5f3a KPW5 \u4f4e\u5185\u5b58\u4e0b\u7684\u4e3b\u9875\u54cd\u5e94\u3002",
+  "notes": "\u4fee\u590d #93\uff1a\u6062\u590d\u4e3b\u9875\u516c\u4f17\u53f7\u5feb\u6377\u5165\u53e3\uff0c\u4e66\u67b6\u6309\u516c\u4f17\u53f7\u8d26\u53f7\u5c55\u793a\u3001\u4e0e\u672c\u673a\u7f13\u5b58\u6587\u7ae0\u5206\u79bb\uff0c\u5e76\u6062\u590d\u9605\u8bfb\u6587\u7ae0\u540e\u8fd4\u56de\u5f53\u524d\u516c\u4f17\u53f7\u5217\u8868\uff1b\u4fee\u590d #97\uff1a\u9605\u8bfb\u65f6\u95f4\u540e\u53f0\u670d\u52a1\u589e\u52a0\u5361\u6b7b\u68c0\u6d4b\u4e0e\u81ea\u52a8\u6062\u590d\uff0c\u6700\u7ec8\u9605\u8bfb\u8fdb\u5ea6\u4f18\u5148\u4e14\u4e0d\u518d\u88ab\u65f6\u95f4\u5199\u5165\u957f\u65f6\u95f4\u963b\u585e\uff0c\u540c\u4e00\u7b14\u672c\u673a\u8fdb\u5ea6\u9009\u62e9\u4e0d\u91cd\u590d\u8be2\u95ee\uff1b\u7edf\u4e00 Wi-Fi \u6062\u590d\u72b6\u6001\uff0c\u5237\u65b0\u4e0d\u518d\u8bef\u5165\u672c\u5730\u4e66\u76ee\u5f55\uff0c\u5e76\u52a0\u5f3a KPW5 \u4f4e\u5185\u5b58\u4e0b\u7684\u4e3b\u9875\u54cd\u5e94\u3002"
 }

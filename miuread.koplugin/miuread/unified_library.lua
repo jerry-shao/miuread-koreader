@@ -424,6 +424,27 @@ function M.build(opts)
         put(map, order, item)
     end
 
+    -- beta.14:公众号 accounts are remote shelf collections. They belong to
+    -- the shelf source even when no article has been cached locally. Cached
+    -- articles are merged separately below and remain device-local records.
+    if weread_state~="logged_out" then
+        for _, row in ipairs(type(opts.mp_accounts) == "table" and opts.mp_accounts or {}) do
+            local item = decorate(row, {
+                source="wechat_mp", content_kind="collection", in_shelf=true,
+                local_available=false, source_state=weread_state,
+            })
+            item.content_type="mp_account"
+            item.content_kind="collection"
+            item.in_account_shelf=true
+            item.remote_status_known=true
+            -- A collection is an entry point, not a reading event. Only actual
+            -- MP articles may participate in the Recent section.
+            item.last_opened=0
+            item.read_at=0
+            put(map, order, item)
+        end
+    end
+
     local externals, external_state = external_rows()
     local zdir = norm_path(external_state.zlibrary and external_state.zlibrary.download_dir or "")
     for _, row in ipairs(type(opts.local_rows) == "table" and opts.local_rows or {}) do

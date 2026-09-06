@@ -135,9 +135,10 @@ local HOME_SECTION_ORDER={"shelf","device","recent"}
 -- fully configurable.
 -- Frontlight is no longer a homepage shortcut candidate. It lives only in the
 -- pull-down direct-control section (and the reader controls).
-local HOME_ACTION_ITEM_ORDER={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
-local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
-local HOME_ACTION_LAYOUT_VERSION=4
+local HOME_ACTION_ITEM_ORDER={"refresh","search","downloads","sync","mp","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
+local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=true,downloads=true,sync=true,mp=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
+local HOME_ACTION_LAYOUT_VERSION=5
+local HOME_ACTION_MAX_VISIBLE=7
 -- Keep the full pull-down control-center candidate pool, but render at most
 -- eight supported/selected controls in one compact row. The display limit is
 -- intentionally separate from the candidate-pool size so new controls do not
@@ -4222,7 +4223,8 @@ function Plugin:_home_note_interaction(first,kind)
         -- instead of letting a subprocess compete with foreground interaction.
         local active=self.background_scheduler.active
         if active and active.user_requested~=true
-            and (active.key=="home_stats" or active.key=="sync_summary" or active.key=="home_shelf") then
+            and (active.key=="home_stats" or active.key=="sync_summary" or active.key=="home_shelf"
+                or active.key=="home_metadata" or active.key=="home_cover" or active.key=="home_cover_render") then
             self:_background_cancel_worker(active.key,"home interaction")
             self.background_scheduler:force_release("home interaction")
         end
@@ -4690,7 +4692,15 @@ function Plugin:_home_manual_refresh()
     end
     if active=="device" then
         self.store:reload(); self.store:prune_missing_files()
-        self:_home_scan_local(true,true)
+        local root=LocalLibrary.normalize(self:_home_root())
+        if root=="" then
+            self:_notify_home_data_changed("section")
+            self:toast("尚未设置本地书库；请从文件管理或设置中选择书库位置",3)
+            return true
+        end
+        -- A refresh only refreshes the configured library. Directory selection
+        -- is an explicit settings/file-management action, never a refresh side effect.
+        self:_home_scan_local(true,false)
         self:_notify_home_data_changed("section")
         return true
     end
@@ -5595,7 +5605,7 @@ end
 -- selection belongs to the local filter popup instead of persistent tabs.
 
 local HOME_ACTION_LABELS={
-    refresh="刷新",search="搜索",downloads="下载",sync="同步",sleep="休眠",
+    refresh="刷新",search="搜索",downloads="下载",sync="同步",mp="公众号",sleep="休眠",
     miuread_settings="觅阅设置",all_books="全部书籍",history="阅读历史",file_manager="文件管理",screenshot="截图",
     extensions="插件与扩展",
 }
@@ -5611,7 +5621,7 @@ function Plugin:_home_toggle_group_item(group,key)
     local is_action=group=="action"
     local items_key=is_action and "action_items" or "panel_items"
     local order=is_action and HOME_ACTION_ITEM_ORDER or HOME_PANEL_ITEM_ORDER
-    local max_count=is_action and 6 or HOME_PANEL_MAX_VISIBLE
+    local max_count=is_action and HOME_ACTION_MAX_VISIBLE or HOME_PANEL_MAX_VISIBLE
     local items=home[items_key] or {}
     local currently=items[key]==true
     local count=0
@@ -5619,7 +5629,7 @@ function Plugin:_home_toggle_group_item(group,key)
         if items[name]==true and (is_action or self:_home_panel_item_available(name)) then count=count+1 end
     end
     if not currently and count>=max_count then
-        self:toast((is_action and "主页快捷栏最多显示六项" or "控制中心最多显示 8 项"),2)
+        self:toast((is_action and ("主页快捷栏最多显示 "..tostring(HOME_ACTION_MAX_VISIBLE).." 项") or "控制中心最多显示 8 项"),2)
         return false
     end
     items[key]=not currently
@@ -5746,7 +5756,7 @@ function Plugin:_home_group_enabled_count(group)
     for _,key in ipairs(order) do
         if items[key]==true and (is_action or self:_home_panel_item_available(key)) then count=count+1 end
     end
-    return is_action and math.min(count,6) or count
+    return is_action and math.min(count,HOME_ACTION_MAX_VISIBLE) or count
 end
 
 function Plugin:_home_restore_all_quick_defaults()
@@ -5771,7 +5781,7 @@ function Plugin:home_customization_menu()
         and (tostring(panel_count).." 已选 · 最多 "..tostring(HOME_PANEL_MAX_VISIBLE))
         or (tostring(panel_count).." / "..tostring(HOME_PANEL_MAX_VISIBLE))
     return {
-        {text="主页快捷栏",post_text=tostring(self:_home_group_enabled_count("action")).." / 6",sub_item_table_func=function() return self:home_action_settings_menu() end},
+        {text="主页快捷栏",post_text=tostring(self:_home_group_enabled_count("action")).." / "..tostring(HOME_ACTION_MAX_VISIBLE),sub_item_table_func=function() return self:home_action_settings_menu() end},
         {text="下滑控制中心",post_text=panel_post,sub_item_table_func=function() return self:home_panel_settings_menu() end},
         {text="恢复全部推荐布局",post_text="主页 + 下滑控制中心",callback=function() self:_home_restore_all_quick_defaults() end},
     }
@@ -7433,8 +7443,21 @@ function Plugin:_home_set_library_filter(section,key,value)
     if key=="source" and not (section=="shelf" and tostring(value)=="weread") then home.weread_group="all" end
     self:_save_home_preferences(home,preferences)
     if HomeView.is_shown() then self:_refresh_home_view(nil,"content") end
+    local requested_mp=key=="source" and section=="shelf" and tostring(value)=="wechat_mp"
+    local network_started=false
+    if requested_mp and self:logged_in() and self.mp and self.mp_async and not self.mp_async:busy() then
+        local cached=self.mp:cached_accounts()
+        if type(cached)~="table" or #cached==0 then
+            network_started=self:_refresh_mp_accounts(function(accounts)
+                if type(accounts)=="table" and HomeView.is_shown() and not self:_active_reader_ui() then
+                    self:_home_apply_remote_cache_snapshot()
+                    self:_refresh_home_view(nil,"content")
+                end
+            end,true)==true
+        end
+    end
     logger.info(key=="source" and "[MiuRead][HomeSourceSwitch]" or "[MiuRead][HomeSortSwitch]",
-        "section=",tostring(section),"value=",tostring(value),"network=false",
+        "section=",tostring(section),"value=",tostring(value),"network=",tostring(network_started),
         "elapsed_ms=",tostring(math.floor((os.clock()-started)*1000+.5)))
     return true
 end
@@ -7473,6 +7496,12 @@ function Plugin:_home_source_status_label(source)
         if weread=="auth_required" then return "需要重新登录" end
         if weread=="logged_out" then return "未登录" end
         return "待验证"
+    end
+    if source=="wechat_mp" then
+        if not self:logged_in() then return "未登录" end
+        if self.mp_async and self.mp_async:busy() then return "获取中" end
+        local cached=self.mp and self.mp:cached_accounts() or {}
+        return type(cached)=="table" and #cached>0 and "缓存可用" or "待获取"
     end
     if source=="fanqie" and type(state.fanqie)=="table" then
         if state.fanqie.logged_in==true then return "缓存书架" end
@@ -7557,7 +7586,7 @@ function Plugin:_show_home_library_source_picker(section,anchor)
     end
     return ActionSheet.show{
         title=section=="device" and "本机来源" or "书架来源",
-        subtitle="来源切换只筛选本地索引，不会重新联网",
+        subtitle="已有索引直接筛选；公众号没有缓存时会获取一次",
         actions=actions,columns=2,anchor=anchor,width_ratio=.72,
         cache_key="home_library_source_"..section,
     }
@@ -7669,10 +7698,11 @@ function Plugin:_show_home_weread_group_picker(anchor)
     }
 end
 
-function Plugin:_home_unified_sections(account_rows,generated_rows,local_rows,mp_articles,recent_local_rows,home)
+function Plugin:_home_unified_sections(account_rows,generated_rows,local_rows,mp_accounts,mp_articles,recent_local_rows,home)
     local weread_state=self:_home_weread_source_state()
     local data=UnifiedLibrary.build{
-        account=account_rows,generated=generated_rows,local_rows=local_rows,mp_articles=mp_articles,
+        account=account_rows,generated=generated_rows,local_rows=local_rows,
+        mp_accounts=mp_accounts,mp_articles=mp_articles,
         recent_local=recent_local_rows, membership=home.library_membership or {},
         weread_state=weread_state,
     }
@@ -7714,6 +7744,11 @@ function Plugin:_home_unified_section_title(section)
         labels={all="本机",weread="微信下载",fanqie="番茄下载",wechat_mp="公众号",zlibrary="Z-Library",["local"]="本地书"}
     else
         labels={all="书架",weread="微信书架",fanqie="番茄书架",wechat_mp="公众号",zlibrary="Z-Library",["local"]="本地书"}
+    end
+    if section=="shelf" and source=="wechat_mp" and #rows==0 then
+        if not self:logged_in() then return "公众号 · 需要登录" end
+        if self.mp_async and self.mp_async:busy() then return "公众号 · 获取中" end
+        return "公众号 · 待获取"
     end
     return tostring(labels[source] or (UnifiedLibrary.source_labels()[source] or "书架")).." "..tostring(#rows)
 end
@@ -9529,9 +9564,12 @@ function Plugin:_home_action_entries()
         refresh={icon="↻",icon_key="refresh",label="刷新",callback=function() self:_home_manual_refresh() end},
         search={icon="⌕",icon_key="search",label="搜索",callback=function() self:search_dialog("搜索微信读书") end},
         downloads={icon="⇩",icon_key="download",label="下载",badge=download_badge,callback=function() self:show_downloads() end},
-        sync={icon="⇅",icon_key="sync",label="同步",badge=sync_badge,callback=function(anchor)
-            self:_sync_home_pending(); self:_show_home_quick_notice(anchor,"正在同步","未完成内容已提交")
+        sync={icon="⇅",icon_key="sync",label="同步",badge=sync_badge,callback=function()
+            -- _sync_home_pending reports the actual result. Do not claim a
+            -- submission happened when this click is only verifying or waiting.
+            self:_sync_home_pending()
         end},
+        mp={icon="▤",icon_key="newspaper",label="公众号",callback=function() self:show_mp_shelf(false) end},
         miuread_settings={icon="⚙",icon_key="settings",label="设置",callback=function() self:_show_home_settings_center() end},
         all_books={icon="▦",label="全部书籍",callback=function() self:show_home_all_books() end},
         history={icon="◷",label="阅读历史",callback=function() self:show_home_reading_history() end},
@@ -9547,7 +9585,7 @@ function Plugin:_home_action_entries()
     for _,key in ipairs(home.action_order or HOME_ACTION_ITEM_ORDER) do
         if home.action_items[key]==true and definitions[key] and not used[key] then
             used[key]=true; entries[#entries+1]=definitions[key]
-            if #entries>=6 then break end
+            if #entries>=HOME_ACTION_MAX_VISIBLE then break end
         end
     end
     return entries
@@ -13390,6 +13428,16 @@ function Plugin:_reader_battery_label()
     return tostring(math.max(0,math.min(100,math.floor(value+.5)))).."%"
 end
 
+
+function Plugin:_show_reader_more_panel()
+    local current_path=self:_current_document_path()
+    local context=self.mp and self.mp.identify_path and self.mp:identify_path(current_path) or nil
+    if context then
+        return self:_show_standalone_menu("公众号阅读",self:reader_menu(),{page_size=7})
+    end
+    return self:show_reader_control_center("reading")
+end
+
 function Plugin:_reader_toolbar_header(title)
     local started=os.clock()
     local device_started=os.clock()
@@ -13443,7 +13491,7 @@ function Plugin:_reader_toolbar_header(title)
         time_label=self:_display_time("%H:%M"),
         battery_label=battery,
         more_label="更多",
-        more_callback=function() return self:show_reader_control_center("reading") end,
+        more_callback=function() return self:_show_reader_more_panel() end,
         chapter_label="☰ 目录",
         chapter_callback=function() return self:_show_reader_toc(function() self:show_reader_quick_panel() end) end,
         location_label=location_text,
@@ -16636,7 +16684,7 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
         hero.recent_key=tostring(recent_state.current.key or recent_state.current.recent_key or self:_home_book_key(hero))
     end
 
-    local sections=self:_home_unified_sections(account_rows,miuread_rows,local_rows,mp_article_rows,recent_local_rows,home)
+    local sections=self:_home_unified_sections(account_rows,miuread_rows,local_rows,mp_rows,mp_article_rows,recent_local_rows,home)
     self._home_data_revision=(tonumber(self._home_data_revision) or 0)+1
     self._home_sections=sections
     self:_home_clear_cloud_page_cache()
@@ -22472,6 +22520,71 @@ function Plugin:_save_progress_state(id,state,message,localp,remotep,sequence)
     self:_invalidate_home_sync_status()
     return true
 end
+function Plugin:_progress_position_fingerprint(position)
+    position=type(position)=="table" and position or {}
+    local uid=tostring(position.chapter_uid or position.chapterUid or "")
+    local co=tonumber(position.canonical_offset or position.chapter_offset or position.offset)
+    local basis=tostring(position.offset_basis or position.position_basis or "")
+    if uid~="" and co~=nil then
+        return table.concat({uid,tostring(math.floor(co+.5)),basis},"|")
+    end
+    local p=tonumber(position.progress)
+    return p and ("percent|"..string.format("%.3f",p)) or ""
+end
+
+function Plugin:_remember_local_progress_choice(book_id,position)
+    local fingerprint=self:_progress_position_fingerprint(position)
+    if tostring(book_id or "")=="" or fingerprint=="" then return false end
+    self.store:save_session(tostring(book_id),{
+        progress_resolution_choice="local",
+        progress_resolution_fingerprint=fingerprint,
+        progress_resolution_at=os.time(),
+    })
+    return true
+end
+
+function Plugin:_clear_progress_resolution(book_id)
+    if tostring(book_id or "")=="" then return false end
+    self.store:save_session(tostring(book_id),{
+        progress_resolution_choice=false,
+        progress_resolution_fingerprint=false,
+        progress_resolution_at=false,
+    })
+    return true
+end
+
+function Plugin:_local_progress_choice_matches(book_id,position)
+    local session=(self:_persisted_sessions()[tostring(book_id or "")]) or self.store:session(tostring(book_id or "")) or {}
+    if tostring(session.progress_resolution_choice or "")~="local" then return false end
+    local expected=tostring(session.progress_resolution_fingerprint or "")
+    return expected~="" and expected==self:_progress_position_fingerprint(position)
+end
+
+function Plugin:_resume_remembered_local_progress(book_id)
+    book_id=tostring(book_id or "")
+    if book_id=="" then return false end
+    local item
+    for _,candidate in ipairs(self:_progress_sync_issue_items()) do
+        if tostring(candidate.book_id or "")==book_id then item=candidate; break end
+    end
+    if item then
+        UIManager:scheduleIn(.10,function()
+            if item.can_recover_coordinate then
+                self:_recover_pending_progress_coordinate(item,function() end)
+            elseif item.can_send then
+                self:_submit_saved_pending_progress(item,function() end)
+            elseif item.can_verify then
+                self:_retry_saved_progress_verification(item,function() end)
+            end
+        end)
+        return true
+    end
+    -- No durable transaction survived, so create one from the same current
+    -- coordinate. This path is only used after an explicit local choice.
+    UIManager:scheduleIn(.10,function() self:upload_local_progress(false) end)
+    return true
+end
+
 function Plugin:ensure_read_report_progress(reason,automatic)
     local prefs=self.store:preferences().sync or {}
     local r=self.sync:record()
@@ -22544,6 +22657,13 @@ function Plugin:ensure_read_report_progress(reason,automatic)
                 return
             end
             self._progress_remote_retries[id]=0
+            if automatic==true and self:_local_progress_choice_matches(id,local_position) then
+                local remembered_remote=remote.conflict and ((remote.web and remote.web.percent) or (remote.agent and remote.agent.percent)) or remote.percent
+                self:_save_progress_state(id,"deferred","已选择使用本机位置，继续后台确认",localp,tonumber(remembered_remote))
+                self.sync:end_progress_sync("继续此前已选择的本机位置，不重复询问")
+                self:_resume_remembered_local_progress(id)
+                return
+            end
             if remote.conflict then
                 local webp=remote.web and math.floor((tonumber(remote.web.percent) or 0)+.5) or nil
                 local agentp=remote.agent and math.floor((tonumber(remote.agent.percent) or 0)+.5) or nil
@@ -22564,6 +22684,7 @@ function Plugin:ensure_read_report_progress(reason,automatic)
             -- chapter mismatch or a clearly different chapter offset.
             local aligned=coordinate_match or (not has_authoritative_coordinates and cmp=="same")
             if aligned then
+                self:_clear_progress_resolution(id)
                 self.sync:mark_verified(id,"positions_aligned",localp,remotep,local_position)
                 self:_save_progress_state(id,"aligned",coordinate_match and "章节位置一致" or "本机与云端位置接近",localp,remotep)
                 self.sync:end_progress_sync("位置已确认")
@@ -22843,6 +22964,7 @@ function Plugin:_commit_progress_verified(book_id,submitted_position,remote,mess
     local remotep=tonumber(remote and remote.percent)
     self.store:save_session(book_id,{
         pending_progress=false,pending_progress_coordinate=false,
+        progress_resolution_choice=false,progress_resolution_fingerprint=false,progress_resolution_at=false,
         progress_sync_state="local_uploaded",
         progress_sync_message=tostring(message or "阅读进度已从云端确认"),
         progress_local_percent=localp,
@@ -23190,6 +23312,7 @@ function Plugin:upload_local_progress(manual,callback)
         end
 
         local snapshot=self:_prepare_progress_snapshot(id,position) or position
+        if manual then self:_remember_local_progress_choice(id,snapshot) end
         local target=math.floor((tonumber(snapshot.progress) or 0)+.5)
         if manual then self:status_toast("阅读进度同步","正在上传 "..target.."%……",3) end
         local upload_started=self:_submit_progress_snapshot(id,snapshot,{
@@ -23275,6 +23398,7 @@ function Plugin:upload_local_progress(manual,callback)
 end
 
 function Plugin:_use_remote_position(id,localp,remote)
+    self:_clear_progress_resolution(id)
     local remotep=tonumber(remote and remote.percent) or 0
     local jumped,jump_error=self.sync:jump_remote(remote)
     if not jumped then
@@ -27147,39 +27271,35 @@ function Plugin:_reading_end_sync(reason,options,callback)
                         mark_critical_done(false,"progress_worker_busy")
                     end
                 end
-                -- The final reading-time write must complete before the final
-                -- progress write. This wait is background-only: the Reader close
-                -- gate is released as soon as the exact snapshot is durable.
+                -- beta.14: the final exact position is already durable. Give an
+                -- already-dispatched final reading-time write only a very short
+                -- chance to finish; never run two /web/book/read writes at once.
+                -- If the time writer is still busy, keep this exact progress as
+                -- pending and let Home/resume continue it later instead of
+                -- holding Reader close for tens of seconds.
                 if time_handoff then
-                    local barrier_attempt=0
-                    local function wait_final_time()
-                        barrier_attempt=barrier_attempt+1
-                        local wait_seconds=critical_wait_seconds(18)
-                        if wait_seconds<=0 then
-                            self._reading_end_background_verify_active=false
-                            self:_save_progress_state(book_id,"deferred",
-                                "最终位置已保存；休眠收尾达到时间上限，稍后再提交进度",
-                                tonumber(snapshot.progress),nil,snapshot.progress_sequence)
-                            mark_critical_done(false,"finalizer_deadline")
-                            return
-                        end
+                    local wait_seconds=math.min(4,critical_wait_seconds(4))
+                    if wait_seconds<=0 then
+                        self._reading_end_background_verify_active=false
+                        self:_save_progress_state(book_id,"deferred",
+                            "最终位置已保存；阅读时间仍在收尾，稍后继续提交进度",
+                            tonumber(snapshot.progress),nil,snapshot.progress_sequence)
+                        mark_critical_done(false,"time_writer_busy")
+                    else
                         self.sync:wait_writer_barrier(time_handoff,function(barrier_ok)
                             if barrier_ok then
                                 start_background_progress()
-                            elseif not critical_deadline and barrier_attempt<2 then
-                                UIManager:scheduleIn(2,wait_final_time)
                             else
                                 self._reading_end_background_verify_active=false
                                 self:_save_progress_state(book_id,"deferred",
-                                    "最终位置已保存；阅读时间收尾尚未结束，稍后再提交进度",
+                                    "最终位置已保存；阅读时间仍在收尾，稍后继续提交进度",
                                     tonumber(snapshot.progress),nil,snapshot.progress_sequence)
-                                logger.warn("[MiuRead][ReadingEnd] final progress deferred behind time writer",
+                                logger.warn("[MiuRead][ReadingEnd] final progress parked behind time writer",
                                     "book=",book_id,"barrier=",tostring(time_handoff))
-                                mark_critical_done(false,"time_barrier_timeout")
+                                mark_critical_done(false,"time_writer_busy")
                             end
                         end,wait_seconds)
                     end
-                    wait_final_time()
                 else
                     start_background_progress()
                 end
