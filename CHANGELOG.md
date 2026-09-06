@@ -1,3 +1,14 @@
+## 5.8.0-beta.12
+
+- 针对 #91 的 KPW6 极端卡顿修复持久化状态膨胀：Schema 升至 131，升级时把历史 session/report context 压缩为有界结构；完整章节目录只保留在 `library.catalog` 一份，不再在每个 session 中重复保存。已有旧状态若缺少 library catalog，会先从完整旧 context 保守迁移再去重，不删除精确 pending 进度、登录状态和用户设置。
+- `Store:save_session` 增加持久化字段收口，后续同步不能再把整本章节映射重新写回 session；正常写盘前会再次压缩旧 session，避免多个 Store 快照互相合并时把旧大对象复活。遇到 `chunk has too many syntax levels` 时增加一次安全应急修复并重新原子写入，失败仍保留原设置文件。
+- 针对 #91 日志中约 95 MiB 可用内存时启动图书下载后 KOReader 被系统终止的问题，新增下载启动内存预检：先 GC，再在低于 96 MiB 时暂缓启动 heavy worker，保留已有断点并提示用户稍后重试；不再明知处于低内存保护区仍 fork 大型下载进程。
+- 针对 #92 Kobo 休眠唤醒后 `radio=true` 但长期 `connected=false` 的恢复缺口，休眠前记录用户原本的 Wi-Fi 开启意图；唤醒后不再只轮询状态，而是复用 KOReader `NetworkMgr.restoreWifiAsync()` + `scheduleConnectivityCheck()` 官方恢复路径。觅阅不直接启动/停止 `dhcpcd`、`wpa_supplicant` 等设备网络服务。
+- Kobo/Kindle 网络恢复增加有界状态机：恢复期间标记 `recovering`，观察窗口覆盖 KOReader 原生异步恢复所需的约 45 秒；成功后由 KOReader 的连接状态收口，超时后停止自动等待并在主页提示用户手动重新连接，不无限重试。
+- 针对 #86/#92 的“Wi-Fi 未恢复时主页仍启动网络后台任务”增加网络门禁：自动书架刷新、远程资料、网络封面和微信阅读统计在 `recovering/down` 阶段不启动；本地统计与缓存页面仍可工作，用户主动触发的联网操作不被静默吞掉。
+- 保留 beta.6/beta.7 已完成的主页页缓存、Reader 前后台让路、QuickPanel 缓存优先和后台 PARK/WAKE；本版不再另起一套性能框架，也不修改第三方 Z-Library/Pinyin 等插件自己的网络实现。
+- 扩展市场继续使用 beta.11 的 Extension Engine v4，本版不修改其下载源、SHA、Archiver、事务安装和断点规则；阅读进度算法、批注协议和 OTA 核心也不在本次 #86/#91/#92 修复范围。
+
 ## 5.8.0-beta.11
 
 - 重做内置扩展市场下载安装内核：一键安装只接受觅阅目录中已经明确记录版本、官方安装包 URL、精确大小、SHA-256 与目标 `.koplugin` 目录的扩展；社区搜索继续保留，但未收录确定安装包的仓库不再猜 Release、源码 ZIP、分支或插件目录。

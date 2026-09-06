@@ -1,7 +1,7 @@
 local C = {
     NAME = "觅阅 · 微信读书助手",
-    VERSION = "5.8.0-beta.11",
-    SCHEMA = 130,
+    VERSION = "5.8.0-beta.12",
+    SCHEMA = 131,
     MIN_SUPPORTED_SCHEMA = 113,
     PLUGIN_DIR = "miuread.koplugin",
     DATA_DIR = "miuread",
@@ -258,6 +258,11 @@ local C = {
     HEAVY_NATIVE_HIBERNATE_KB = 96 * 1024,
     HEAVY_NATIVE_CRITICAL_KB = 64 * 1024,
     HEAVY_DOWNLOAD_RESUME_MIN_KB = 72 * 1024,
+    -- Ref #91: do not fork a fresh book-download worker when the device is
+    -- already at the low-memory boundary observed on KPW6. Resume remains a
+    -- little more permissive because a checkpointed worker has already paid
+    -- most of its setup cost.
+    HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024,
 
     -- beta.4 coalesces repeated typography taps into one KOReader reflow. On a
     -- low-memory/heavy-download overlap, let the downloader checkpoint first

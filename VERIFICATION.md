@@ -1,45 +1,68 @@
-# 5.8.0-beta.11 verification
+# 5.8.0-beta.12 verification
 
-Scope: built-in extension market download/install engine v4. The book downloader, sync, reading-progress, annotation and OTA cores are intentionally outside this refactor.
+Scope: crash-backed fixes for issues #86, #91 and #92. The beta.11 Extension Engine v4 is kept unchanged apart from version/schema integration.
 
-## Completed source/build checks
+## #91 — KPW6 extreme lag / settings growth
 
-- Version identity: `miuread/config.lua` is `5.8.0-beta.11`; schema is **130** and the 129→130 migration is present.
-- Legacy Package Manager v3 runtime modules removed: `extension_transfer.lua`, `extension_verifier.lua`, `extension_package.lua`, `extension_installer.lua`, and `extension_task.lua` are no longer shipped or required.
-- New single-chain implementation is present: `extension_download.lua` → `extension_install.lua`, with `extension_job.lua` as the sole task lifecycle owner; `extension_center.lua` no longer contains a second archive verifier/installer.
-- Static v4 invariant suite: **63/63 passed**. It checks deterministic source order, no route scoring/three-source truncation, manual source fail-closed behavior, source-local partials, size+SHA gating, HTTP→curl fallback, cache revalidation, Archiver-only installation, staging/journal/rollback, lifecycle/cancel/delete rules, schema migration and deterministic catalog rules.
-- Dynamic catalog test passed: **18 deterministic catalog packages** have valid HTTPS URL, exact positive size, 64-hex SHA-256 and a fixed target `.koplugin` directory. Entries without a verified official install asset do not become installable through guessing.
-- Dynamic downloader fault-model test passed: direct source with a **same-size wrong SHA** is rejected and mirror 1 succeeds; direct source with a **truncated size** is rejected and mirror 1 succeeds; large-file partials for direct/mirror routes remain physically separate and are never inherited across sources; invalid manually selected mirrors fail closed instead of silently falling back to GitHub.
-- Dynamic installer test passed with a mocked KOReader Archiver: normal update installs the new plugin transactionally; an injected failure during `new → target` restores the previous plugin; a `../` archive entry is rejected before it can touch the installed plugin.
-- Lua syntax: **136/136** shipped plugin Lua files pass `texluac -p` after the final edits.
-- Regression scope guard: compared with 5.8.0-beta.10, **240 common files remain SHA-identical**. Plugin-code changes are restricted to version/schema wiring, catalog/center/store integration, removal of the five v3 extension modules and addition of the three v4 extension modules.
-- The user-supplied `appstore.koplugin.zip` was independently checked: **273,795 bytes**, SHA-256 `dde0fcb3d8254a3c573ab8c46e7e5f35b688fb4f4177909211aeae7ed7d76449`, ZIP CRC clean, with `appstore.koplugin/main.lua` and `_meta.lua`; this exactly matches the deterministic catalog record.
+The supplied #91 log repeatedly records `settings flush failed` with a generated `miuread.lua` around line 100,146–100,229 and `chunk has too many syntax levels`. It also records a fresh book download started with about 95 MiB available memory immediately before KOReader was killed.
 
-## Official catalog metadata rechecked
+Implemented safeguards:
 
-The critical problem cases are pinned to exact GitHub Release assets:
+- Schema **131** compacts historical session/report context storage. A complete chapter catalog has one durable owner (`library[bookId].catalog`) instead of being duplicated in every session/report context.
+- Migration preserves exact pending progress and user/account state. If an old session contains the only complete catalog, it is promoted to the library record before the duplicate session copy is removed.
+- Future `save_session` calls apply the same bounded persistent shape, so the old chapter arrays cannot simply grow back after migration.
+- Every normal settings flush compacts merged session state before serialization. If serialization specifically fails with `too many syntax levels`, an emergency compaction removes regenerable duplicate/cache objects and retries one atomic write; the previous settings file is retained if the retry still fails.
+- The downloader no longer stores the same full chapter map in both the library and session records.
+- Fresh heavy book downloads run GC and a memory preflight before worker state/fork. Below **96 MiB** the task is deferred with a user-visible message and existing checkpoints are kept, instead of starting a worker in the same low-memory state seen immediately before the supplied crash.
 
-- Fanqie v2.2.1 — 126,623 bytes — SHA-256 `21b368198b26c2f0f874f413c001f87c94af82a2292046620fcb2207c16de86b`.
-- Z-Library v1.0.49 — 445,092 bytes — SHA-256 `455423604c7c5eab20fa00f9ac31c89514202892b34347c45fc34435e1252553`.
-- InkStain v3.5.7 — 9,983,676 bytes — SHA-256 `87da12b78dd941f424c617fc10fdb620ca239b60fc9b61b39089f4c4717e0bee`.
-- Pinyin IME v1.2.0 — 63,312,207 bytes — SHA-256 `14047ed2638c32637c1dbc831f676967a221548f435443815b1c223881f4bbcb`.
+Dynamic state-repair test (`tools/test_store_repair.lua`) passed. It creates a schema-130 store containing a 320-chapter duplicated catalog and deeply nested historical junk, migrates to schema 131, verifies the canonical catalog and exact pending progress survive, verifies duplicate contexts are removed, and confirms a subsequent session save cannot regrow them.
 
-## Release package verification
+## #92 — Kobo Wi-Fi after suspend/resume
 
-- Full install ZIP: `miuread-v5.8.0-beta.11-full.zip`
-- Size: **1,914,158 bytes**
-- SHA-256: `8d14d3326f67190e5cef77c36d2b0ac180ae89ead8da4b0360ecf9299530e2be`
-- ZIP integrity: Python `ZipFile.testzip()` and `unzip -t` both passed.
-- Package structure: all **258 entries** stay under `miuread.koplugin/`; required main/meta/config and the three v4 engine modules are present; the five v3 engine files and forbidden `.md/.epub/.log` runtime files are absent.
-- Manifest size/SHA and beta identity match the built ZIP.
-- Deterministic rebuild using the release workflow algorithm produced a **byte-for-byte identical** ZIP.
+The supplied #92 log shows an underlying Kobo/KOReader network inconsistency (`dhcpcd not running`) and later remains `radio=true`, `connected=false`, `online=false` through the 52-second observation point. MiuRead must not claim to repair the firmware daemon itself.
 
-## Still requires real-device validation
+Implemented MiuRead-side recovery:
 
-Static/fault-model verification cannot emulate Kindle/Kobo firmware networking, suspend hooks or KOReader's actual bundled Archiver/curl binaries. Before promoting this beta to a stable release, the following should still be run on real devices:
+- The pre-suspend Wi-Fi **intent** is remembered before KOReader tears networking down for Kobo suspend.
+- On resume, when Wi-Fi was intended to remain available, MiuRead now calls KOReader's own `NetworkMgr.restoreWifiAsync()` and `scheduleConnectivityCheck()` path instead of merely observing `isWifiOn()`.
+- If KOReader already has a connection attempt in progress, MiuRead reuses it instead of creating a competing recovery.
+- Recovery is bounded and observes `.8 / 3 / 6 / 12 / 24 / 40 / 48 s`, covering KOReader's documented asynchronous restore window. Success releases the recovering state; failure stops automatic waiting and exposes a manual reconnect message.
+- MiuRead's recovery code contains no direct network-daemon shell manipulation (`dhcpcd`, `wpa_supplicant`, `ifconfig`, etc.). The device-specific work stays owned by KOReader.
+- While networking is recovering/down, automatic remote Home jobs (shelf, remote metadata, remote covers and WeRead stats) are gated so they cannot each spend tens of seconds failing on an interface that is not connected. Local/cache UI remains available.
 
-- Kindle: Fanqie, Z-Library, InkStain and Pinyin IME install; Pinyin large-file pause/resume; screen-off/background download; restart while partially downloaded; update rollback smoke test.
-- Kobo: the same small-package install path plus wake/Wi-Fi-not-ready → WAIT_NETWORK → successful continuation, especially on the device class affected by issue #92.
-- Confirm the device has a usable large-file SHA backend (`sha256sum`, BusyBox `sha256sum`, or OpenSSL) for Pinyin IME. Small packages have an in-process SHA fallback; the 63 MB package intentionally avoids whole-file Lua memory loading.
+This fixes MiuRead's recovery/control-flow gap. Real Kobo hardware is still required to determine whether KOReader's own device backend can recover a particular firmware/launcher state; beta.12 deliberately does not bypass KOReader and take ownership of Kobo networking.
 
-The source/build/fault-model gates above are complete. They deliberately do not claim to replace the final hardware matrix.
+## #86 — Home / Wi-Fi / shelf latency
+
+The supplied #86 log contains old 5.6 paths where a Home section switch takes about 5 seconds even though the resulting layer itself is cheap, plus network-unreachable periods. The major Home cache/foreground-priority/QuickPanel changes were already introduced in beta.6/beta.7 and remain in beta.12.
+
+This release adds the missing recovery gate relevant to #86: automatic remote work does not start while Wi-Fi is still recovering or recently down. It does not attempt to modify third-party plugins' own HTTP loops (for example, Z-Library network errors seen in the log are emitted by that plugin, not by MiuRead).
+
+A real-device #86 regression test remains necessary because the residual cost of KOReader layout/e-ink rendering cannot be reproduced by source-level tests.
+
+## Automated verification
+
+- Static/invariant suite: **74/74 passed** (`python tools/verify_beta12.py`).
+- Shipped Lua syntax: **136/136 passed** as part of the suite.
+- Extension catalog regression: PASS — 18 deterministic packages.
+- Extension download fault model: PASS.
+- Extension installer transaction/rollback/path-safety model: PASS.
+- Store schema-131/session-compaction dynamic test: PASS.
+- Static network guard confirms the resume path uses KOReader-owned restore/connectivity APIs and does not directly execute network-daemon commands.
+
+## Hardware validation required before stable promotion
+
+1. **KPW6 / #91:** upgrade the affected long-lived install without deleting settings; verify the migration completes, normal settings writes resume, Home/QuickPanel/shelf switching no longer accumulates tens-of-seconds delays, and a low-memory fresh download is deferred rather than killing KOReader.
+2. **Kobo Glo HD / #92:** Wi-Fi initially connected → Home → suspend → wake. Verify the panel enters recovering, KOReader restoration reconnects without returning to Nickel, and automatic shelf/stats workers remain parked until connectivity is actually restored. Also test the bounded failure message when the underlying KOReader backend cannot restore.
+3. **KPW6 / #86:** repeat source/page switching and QuickPanel interaction on the original device. Cached/local navigation must remain usable while networking is unavailable.
+
+These source/fault-model gates verify the MiuRead changes; they do not claim to emulate Kobo firmware networking or Kindle OOM behavior exactly.
+
+## Built beta package
+
+- Full install ZIP: `miuread-v5.8.0-beta.12-full.zip`
+- Size: **1,917,935 bytes**
+- SHA-256: `3767fc6ec1614af17a25969008aafb83d41c04372e3d695504ae31649fed0630`
+- Runtime ZIP entries: **258**, all under `miuread.koplugin/`.
+- Python `ZipFile.testzip()` and `unzip -t` both pass.
+- Manifest version/size/SHA match the generated full ZIP.

@@ -20,8 +20,8 @@ def sha256(p):
 cfg=text(MIU/'config.lua'); main=text(PLUGIN/'main.lua'); store=text(MIU/'store.lua')
 dl=text(MIU/'extension_download.lua'); ins=text(MIU/'extension_install.lua'); job=text(MIU/'extension_job.lua'); center=text(MIU/'extension_center.lua'); catalog=text(MIU/'extension_catalog.lua')
 
-ok('VERSION = "5.8.0-beta.11"' in cfg,'version is 5.8.0-beta.11')
-ok('SCHEMA = 130' in cfg,'schema is 130')
+ok('VERSION = "5.8.0-beta.12"' in cfg,'version is 5.8.0-beta.12')
+ok('SCHEMA = 131' in cfg,'schema is 131')
 for old in ['extension_transfer.lua','extension_verifier.lua','extension_package.lua','extension_installer.lua','extension_task.lua']:
     ok(not (MIU/old).exists(),f'legacy module removed: {old}')
 for new in ['extension_download.lua','extension_install.lua','extension_job.lua']:
@@ -98,6 +98,22 @@ if app.exists():
         bad=z.testzip(); names=z.namelist()
     ok(bad is None,'uploaded AppStore ZIP CRC validates')
     ok(any(n=='appstore.koplugin/main.lua' for n in names) and any(n=='appstore.koplugin/_meta.lua' for n in names),'uploaded AppStore contains deterministic plugin root')
+
+# beta.12 crash-backed repairs (#86/#91/#92).
+dtask=text(MIU/'download_task.lua'); downloader=text(MIU/'downloader.lua')
+ok('if schema<131' in store and 'session_storage_version",2' in store,'schema 131 compacts historical session state')
+ok('compact_sessions_for_library' in store and 'parser-depth emergency compaction' in store,'store has normal + emergency session repair')
+ok('REPORT_CONTEXT_KEYS' in store and 'legacy_report_context' in store,'report contexts are persisted through an explicit bounded shape')
+ok('reader_url=session.url, context_updated_at=os.time()' in downloader and 'reader_url=session.url, chapters=map' not in downloader,'downloader no longer duplicates chapter catalog into sessions')
+ok('HEAVY_DOWNLOAD_START_MIN_KB = 96 * 1024' in cfg,'fresh book downloads have a 96 MiB start guard')
+start=dtask[dtask.find('function DownloadTask:start'):dtask.find('local stamp',dtask.find('function DownloadTask:start'))]
+ok('RuntimePressure.memory_snapshot(true)' in start and 'download start deferred' in start,'download memory preflight runs before worker fork/state snapshot')
+ok('function Plugin:_remember_wifi_suspend_intent' in main and 'self._wifi_suspend_want_on' in main,'pre-suspend Wi-Fi intent is retained')
+ok('function Plugin:_wifi_resume_recover' in main and 'NetworkMgr.restoreWifiAsync' in main and 'NetworkMgr.scheduleConnectivityCheck' in main,'resume uses KOReader-owned async Wi-Fi restore + connectivity check')
+ok('delays={.8,3,6,12,24,40,48}' in main,'Kobo resume recovery observes KOReader restore window without UI polling storms')
+ok('requires_network=true' in main and 'network_recovering' in main,'automatic network Home work is gated while Wi-Fi is recovering')
+wifi_slice=main[main.find('function Plugin:_remember_wifi_suspend_intent'):main.find('function Plugin:_reader_wifi_state')]
+ok('os.execute(' not in wifi_slice,'MiuRead Wi-Fi recovery does not execute network daemon shell commands')
 
 # Syntax-check every shipped Lua source.
 texluac=Path('/usr/bin/texluac')

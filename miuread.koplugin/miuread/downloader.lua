@@ -1146,7 +1146,11 @@ function Downloader:_save(book, chapters, assets, css, cover, opt, failures, ses
             book_version=tonumber(book.version or session.book_version
                 or (type(session.book)=="table" and
                     (session.book.version or session.book.bookVersion or session.book.book_version))),
-            reader_url=session.url, chapters=map, context_updated_at=os.time(),
+            -- The canonical chapter catalog is already persisted once in
+            -- library[bookId].catalog above. Duplicating the full map in
+            -- sessions caused #91's settings file to grow past Lua's parser
+            -- nesting limit on long books.
+            reader_url=session.url, context_updated_at=os.time(),
             app_id=Protocol.app_id(Protocol.USER_AGENT),
         })
     end

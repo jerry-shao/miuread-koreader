@@ -75,6 +75,128 @@ local function invalidate_same_account_contexts_table(sessions)
     end
     return sessions,changed
 end
+-- beta.12 / #91: sessions are control-plane state, not a second copy of the
+-- book database. Older builds persisted complete chapter catalogs inside both
+-- `sessions[*].chapters` and report contexts. On long books this could grow
+-- miuread.lua past 100k lines and make Lua's parser reject the serialized chunk
+-- with "too many syntax levels". Keep only the fields the compatibility report
+-- worker can actually consume; chapter catalogs live in `library[*].catalog`.
+local REPORT_CONTEXT_KEYS={
+    book_id=true,bookId=true,title=true,author=true,summary=true,
+    reader_url=true,url=true,psvts=true,pclts=true,token=true,
+    progress=true,chapter_uid=true,chapterUid=true,chapter_idx=true,chapterIdx=true,
+    chapter_offset=true,offset=true,chapter_word_count=true,
+    local_native_chapter_offset=true,local_chapter_offset_basis=true,
+    local_chapter_uid=true,local_chapter_idx=true,local_chapter_offset=true,
+    local_chapter_word_count=true,local_chapter_title=true,
+    source_is_standalone=true,source_chapter_uid=true,source_chapter_index=true,
+    source_chapter_word_count=true,source_chapter_title=true,
+    catalog_complete=true,remote_progress_loaded=true,remote_progress=true,
+    remote_chapter_uid=true,remote_chapter_idx=true,remote_chapter_offset=true,
+    app_id=true,read_context_updated_at=true,read_context_ready=true,
+    context_updated_at=true,core_map_hash=true,book_version=true,version=true,
+}
+
+local function table_nonempty_array(value)
+    return type(value)=="table" and #value>0
+end
+
+local function compact_report_context(context,keep_chapters)
+    if type(context)~="table" then return context,0 end
+    local out,removed={},0
+    for key,value in pairs(context) do
+        if REPORT_CONTEXT_KEYS[key] then
+            out[key]=U.copy(value)
+        elseif key=="chapters" and keep_chapters==true and table_nonempty_array(value) then
+            out.chapters=U.copy(value)
+        else
+            removed=removed+1
+        end
+    end
+    return out,removed
+end
+
+local function library_catalog_available(library,id)
+    local row=type(library)=="table" and library[tostring(id or "")] or nil
+    return type(row)=="table" and table_nonempty_array(row.catalog)
+end
+
+local function promote_complete_context_catalog(library,id,row)
+    id=tostring(id or "")
+    if id=="" or type(library)~="table" or type(row)~="table" then return false end
+    local book=type(library[id])=="table" and library[id] or nil
+    if not book or table_nonempty_array(book.catalog) then return false end
+    for _,field in ipairs({"legacy_report_context","report_context"}) do
+        local context=type(row[field])=="table" and row[field] or nil
+        if context and context.catalog_complete==true and table_nonempty_array(context.chapters) then
+            book.catalog=U.copy(context.chapters)
+            book.catalog_complete=true
+            book.catalog_chapter_count=math.max(tonumber(book.catalog_chapter_count or 0) or 0,#book.catalog)
+            library[id]=book
+            return true
+        end
+    end
+    return false
+end
+
+local function compact_session_row(row,keep_chapters)
+    if type(row)~="table" then return row,0 end
+    local removed=0
+    if keep_chapters~=true and row.chapters~=nil then row.chapters=nil; removed=removed+1 end
+    for _,field in ipairs({"legacy_report_context","report_context"}) do
+        if type(row[field])=="table" then
+            local compact,count=compact_report_context(row[field],keep_chapters)
+            row[field]=compact
+            removed=removed+count
+        end
+    end
+    return row,removed
+end
+
+local function compact_sessions_for_library(sessions,library,promote_catalogs)
+    sessions=type(sessions)=="table" and sessions or {}
+    library=type(library)=="table" and library or {}
+    local changed,promoted=0,0
+    if promote_catalogs==true then
+        for id,row in pairs(sessions) do
+            if promote_complete_context_catalog(library,id,row) then promoted=promoted+1 end
+        end
+    end
+    for id,row in pairs(sessions) do
+        if type(row)=="table" then
+            local keep=not library_catalog_available(library,id)
+            local _,count=compact_session_row(row,keep)
+            changed=changed+count
+        end
+    end
+    return sessions,library,changed,promoted
+end
+
+
+local function emergency_compact_sessions(sessions)
+    sessions=type(sessions)=="table" and sessions or {}
+    local changed=0
+    for _,row in pairs(sessions) do
+        if type(row)=="table" then
+            if row.chapters~=nil then row.chapters=nil; changed=changed+1 end
+            for _,field in ipairs({"legacy_report_context","report_context"}) do
+                if type(row[field])=="table" then
+                    local compact,count=compact_report_context(row[field],false)
+                    row[field]=compact
+                    changed=changed+count
+                end
+            end
+            -- These fields are diagnostics/readback caches only. If an old
+            -- build ever stored an unexpectedly deep server object here, keep
+            -- the exact pending/local progress but regenerate diagnostics later.
+            for _,field in ipairs({"remote_sources","last_payload_public"}) do
+                if row[field]~=nil then row[field]=nil; changed=changed+1 end
+            end
+        end
+    end
+    return sessions,changed
+end
+
 local function invalidate_upload_health_table(auth)
     auth=U.merge(defaults.auth,auth or {})
     auth.health.notice_pending=false
@@ -814,6 +936,23 @@ function Store:migrate()
             self.db:saveSetting("extension_transfer_legacy_v3","discarded_schema130")
             logger.info("[MiuRead][Migration] schema 129 -> 130 done",
                 "extension_engine=v4","route_health=removed","cross_source_partials=removed","legacy_v3_tasks=discarded")
+        end
+        if schema<131 then
+            -- beta.12 repairs the historical session-context duplication seen in
+            -- #91. Promote a complete context catalog into the durable book row
+            -- when needed, then remove duplicate chapter arrays from sessions.
+            -- No downloaded EPUB, progress snapshot, account or user preference
+            -- is discarded. Future save_session() calls apply the same guard.
+            local sessions=self.db:readSetting("sessions",{}) or {}
+            local library=self.db:readSetting("library",{}) or {}
+            local compacted,new_library,removed,promoted=compact_sessions_for_library(
+                sessions,library,true)
+            self.db:saveSetting("sessions",compacted)
+            self.db:saveSetting("library",new_library)
+            self.db:saveSetting("session_storage_version",2)
+            logger.info("[MiuRead][Migration] schema 130 -> 131 done",
+                "session_context=v2","fields_removed=",tostring(removed),
+                "catalogs_promoted=",tostring(promoted))
         end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
@@ -1652,6 +1791,14 @@ function Store:session(id) return self:get("sessions",{})[tostring(id)] end
 function Store:save_session(id,patch,flush_now)
     local a=self:get("sessions",{}); local k=tostring(id)
     a[k]=U.merge(a[k] or {},patch or {})
+    local library=self:get("library",{}) or {}
+    local keep_chapters=not library_catalog_available(library,k)
+    local _,removed=compact_session_row(a[k],keep_chapters)
+    if removed>0 then
+        logger.info("[MiuRead][StoreRepair] compacted session write",
+            "book=",k,"fields_removed=",tostring(removed),
+            "catalog_in_library=",tostring(not keep_chapters))
+    end
     self.db:saveSetting("sessions",a)
     if flush_now~=false then
         local saved,err=self:flush()
@@ -1877,6 +2024,19 @@ function Store:flush()
             self.db.data.sessions=merge_newer_progress_sessions(self.db.data.sessions,disk_data.sessions)
         end
     end
+    -- Apply the v2 session compacting invariant on every flush as a final
+    -- safety net. This also repairs a stale Home Store instance before it can
+    -- re-introduce a full chapter catalog after a Reader-side migration.
+    do
+        local compacted,library,removed=compact_sessions_for_library(
+            self.db.data.sessions,self.db.data.library,false)
+        self.db.data.sessions=compacted
+        self.db.data.library=library
+        if removed>0 then
+            logger.info("[MiuRead][StoreRepair] pre-flush session compaction",
+                "fields_removed=",tostring(removed))
+        end
+    end
     local previous_path=self.settings_path..".previous"
     if not self.isolated then
         local valid=settings_file_valid(self.settings_path)
@@ -1888,13 +2048,21 @@ function Store:flush()
     -- Validate the complete chunk in memory, atomically replace the target, and
     -- keep the last valid generation if anything fails.
     local payload
-    local ok,err=xpcall(function()
+    local function attempt_write()
         payload=settings_payload(self.db.data,self.settings_path)
         local valid_payload,parse_error=settings_payload_valid(payload)
         if not valid_payload then error("serialized settings invalid: "..tostring(parse_error)) end
         local written,write_error=U.atomic_write(self.settings_path,payload,true)
         if not written then error("atomic settings write failed: "..tostring(write_error)) end
-    end,debug.traceback)
+    end
+    local ok,err=xpcall(attempt_write,debug.traceback)
+    if not ok and tostring(err):find("too many syntax levels",1,true) then
+        local compacted,removed=emergency_compact_sessions(self.db.data.sessions)
+        self.db.data.sessions=compacted
+        logger.warn("[MiuRead][StoreRepair] parser-depth emergency compaction",
+            "fields_removed=",tostring(removed))
+        ok,err=xpcall(attempt_write,debug.traceback)
+    end
     if not ok then
         logger.err("[MiuRead][Store] settings flush failed; keeping previous settings",tostring(err))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end

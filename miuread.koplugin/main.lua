@@ -471,6 +471,12 @@ local function install_home_screensaver_patch()
         -- existing background-power behavior.
         if HomeView.is_shown() then
             local owner=home_owner()
+            -- Ref #92: Kobo intentionally tears Wi-Fi down before real suspend.
+            -- Remember the user's pre-suspend intent at the earliest visual edge
+            -- instead of looking only at the (already off) radio on Resume.
+            if owner and type(owner._remember_wifi_suspend_intent)=="function" then
+                pcall(owner._remember_wifi_suspend_intent,owner,"screensaver_setup")
+            end
             if owner and type(owner._home_quiesce_for_lockscreen_visual)=="function" then
                 local ok_freeze,freeze_err=pcall(owner._home_quiesce_for_lockscreen_visual,owner)
                 if not ok_freeze then
@@ -3705,6 +3711,10 @@ function Plugin:_background_block_reason(options)
     if self:_page_transition_active() or reader_close_active() or reader_rebuild_active() then return "reader_transition" end
     if self:_active_reader_ui() then return "reader_active" end
     if self.annotation_async and self.annotation_async:busy() then return "annotation_sync" end
+    if options.requires_network==true and options.user_requested~=true then
+        local ready,reason=self:_network_background_ready()
+        if not ready then return reason or "network_not_ready" end
+    end
     if options.user_requested~=true and self:_home_ui_busy() then return "foreground_priority" end
     return nil
 end
@@ -4635,6 +4645,7 @@ function Plugin:_home_refresh_remote(force,user_requested)
     end
     local token,block_reason,deferred=self:_background_claim("home_shelf",{
         user_requested=user_requested==true,
+        requires_network=true,
         priority=user_requested==true and 90 or 45,
         retry_delay=user_requested==true and .35 or 1.1,
     },retry)
@@ -6424,6 +6435,40 @@ function Plugin:_reader_open_native_page(label,opener,return_callback)
     return true
 end
 
+function Plugin:_remember_wifi_suspend_intent(source)
+    local ok_nm,NetworkMgr=pcall(require,"ui/network/manager")
+    if not ok_nm or not NetworkMgr then return nil end
+    local radio=nil
+    if type(NetworkMgr.isWifiOn)=="function" then
+        local ok,value=pcall(NetworkMgr.isWifiOn,NetworkMgr)
+        if ok then radio=value==true end
+    end
+    -- KOReader keeps wifi_was_on when it non-interactively disables Kobo Wi-Fi
+    -- for suspend. That is exactly the user intent we need to restore.
+    local wanted=radio
+    if wanted==false and NetworkMgr.wifi_was_on==true then wanted=true end
+    if wanted~=nil then
+        self._wifi_suspend_want_on=wanted==true
+        self._wifi_suspend_intent_at=os.time()
+        logger.info("[MiuRead][WiFi] suspend intent remembered",
+            "source=",tostring(source or "suspend"),"want_on=",tostring(self._wifi_suspend_want_on),
+            "radio=",tostring(radio),"networkmgr_was_on=",tostring(NetworkMgr.wifi_was_on==true))
+    end
+    return self._wifi_suspend_want_on
+end
+
+function Plugin:_network_background_ready()
+    local health=require("miuread.network_health").snapshot()
+    if health.state=="recovering" and tonumber(health.age or 0)<55 then
+        return false,"network_recovering"
+    end
+    if health.state=="down" and tonumber(health.age or 0)<20 then
+        return false,"network_down"
+    end
+    if self:_network_radio_hint()==false then return false,"wifi_off" end
+    return true,nil
+end
+
 function Plugin:_wifi_state_snapshot(NetworkMgr)
     if not NetworkMgr then
         local ok_nm,value=pcall(require,"ui/network/manager")
@@ -6461,9 +6506,12 @@ function Plugin:_wifi_refresh_state(source)
     return state
 end
 
-function Plugin:_wifi_schedule_reconcile(source,want_on)
+function Plugin:_wifi_schedule_reconcile(source,want_on,options)
+    options=type(options)=="table" and options or {}
     self._wifi_reconcile_generation=(tonumber(self._wifi_reconcile_generation) or 0)+1
     local generation=self._wifi_reconcile_generation
+    local delays=type(options.delays)=="table" and options.delays or {.8,3,6,12,24,40,52}
+    local last_delay=tonumber(delays[#delays]) or 0
     local function schedule(delay)
         UIManager:scheduleIn(delay,function()
             if generation~=self._wifi_reconcile_generation then return end
@@ -6473,14 +6521,84 @@ function Plugin:_wifi_schedule_reconcile(source,want_on)
             if want_on==true and linked then
                 require("miuread.network_health").note_success("wifi-reconcile")
                 self._wifi_reconcile_generation=generation+1
+                logger.info("[MiuRead][WiFi] recovery complete",
+                    "source=",tostring(source or "toggle"),"delay=",tostring(delay))
             elseif want_on~=true and state.wifi_on==false then
                 self._wifi_reconcile_generation=generation+1
+            elseif want_on==true and tonumber(delay)==last_delay and options.fail_on_timeout==true then
+                require("miuread.network_health").note_failure(tostring(source or "wifi")..":timeout")
+                self._wifi_reconcile_generation=generation+1
+                logger.warn("[MiuRead][WiFi] recovery timed out",
+                    "source=",tostring(source or "toggle"),"radio=",tostring(state.wifi_on),
+                    "connected=",tostring(state.connected),"online=",tostring(state.online))
+                if options.notify==true and HomeView.is_shown() and not self:_active_reader_ui() then
+                    self:toast("Wi-Fi 未自动恢复，可点 Wi-Fi 重新连接",3)
+                end
             end
         end)
     end
-    -- Kindle can take tens of seconds to re-associate after a real suspend.
-    -- Keep these sparse so recovery is visible without polling continuously.
-    for _,delay in ipairs({.8,3,6,12,24,40,52}) do schedule(delay) end
+    for _,delay in ipairs(delays) do schedule(delay) end
+end
+
+function Plugin:_wifi_resume_recover(source)
+    local ok_nm,NetworkMgr=pcall(require,"ui/network/manager")
+    if not ok_nm or not NetworkMgr then return false,"network_manager_unavailable" end
+    require("miuread.network_health").mark_recovering(tostring(source or "resume"))
+    HomeData.invalidate_device_state()
+    ReaderToolbar.invalidate()
+
+    local radio,connected=self:_wifi_state_snapshot(NetworkMgr)
+    if connected==true then
+        require("miuread.network_health").note_success("resume_already_connected")
+        self:_wifi_refresh_state(tostring(source or "resume")..":already_connected")
+        return true,"already_connected"
+    end
+
+    local completed=false
+    local function complete()
+        if completed then return end
+        completed=true
+        local state=self:_wifi_refresh_state(tostring(source or "resume")..":connected")
+        if state.connected==true and (state.online==true or state.network_phase=="connected") then
+            require("miuread.network_health").note_success("resume_connectivity_check")
+        end
+    end
+
+    local requested=false
+    -- Prefer KOReader's device-owned restore path on every platform that
+    -- provides it. Kobo implements this via restore-wifi-async.sh; MiuRead must
+    -- not manipulate dhcpcd/wpa_supplicant itself.
+    if NetworkMgr.pending_connection==true or NetworkMgr.pending_connectivity_check==true then
+        requested=true
+        logger.info("[MiuRead][WiFi] resume reuses KOReader connection attempt",
+            "source=",tostring(source or "resume"))
+    elseif type(NetworkMgr.restoreWifiAsync)=="function"
+        and type(NetworkMgr.scheduleConnectivityCheck)=="function" then
+        if UIManager and Event then pcall(UIManager.broadcastEvent,UIManager,Event:new("NetworkConnecting")) end
+        local ok_restore,restore_err=pcall(NetworkMgr.restoreWifiAsync,NetworkMgr)
+        if ok_restore then
+            local ok_check,check_err=pcall(NetworkMgr.scheduleConnectivityCheck,NetworkMgr,complete)
+            requested=ok_check==true
+            if not ok_check then
+                logger.warn("[MiuRead][WiFi] resume connectivity check failed",tostring(check_err))
+            end
+        else
+            logger.warn("[MiuRead][WiFi] resume restore failed",tostring(restore_err))
+        end
+    elseif type(NetworkMgr.enableWifi)=="function" then
+        local ok_enable,value=pcall(NetworkMgr.enableWifi,NetworkMgr,complete,false)
+        requested=ok_enable and value~=false
+    elseif radio~=true then
+        requested=self:_wifi_start(NetworkMgr,source)==true
+    end
+
+    self:_wifi_schedule_reconcile(source,true,{
+        delays={.8,3,6,12,24,40,48},fail_on_timeout=true,notify=true,
+    })
+    logger.info("[MiuRead][WiFi] resume recovery requested",
+        "source=",tostring(source or "resume"),"requested=",tostring(requested),
+        "radio=",tostring(radio),"connected=",tostring(connected))
+    return requested,"requested"
 end
 
 function Plugin:_wifi_start(NetworkMgr,source)
@@ -9995,6 +10113,7 @@ function Plugin:_home_schedule_network_metadata(book,force,silent,on_done,explic
     end
     local token,block_reason,deferred=self:_background_claim("home_metadata",{
         user_requested=explicit,
+        requires_network=true,
         priority=explicit and 88 or 28,
         retry_delay=explicit and .25 or tonumber(Config.BACKGROUND_RETRY_SECONDS) or .9,
     },retry)
@@ -10286,7 +10405,7 @@ function Plugin:_home_schedule_remote_covers(books)
         end
     end
     local token,block_reason,deferred=self:_background_claim("home_cover",{
-        priority=25,retry_delay=lightweight and 1.4 or .9,
+        requires_network=true,priority=25,retry_delay=lightweight and 1.4 or .9,
     },retry)
     if not token then return deferred==true end
     self._home_cover_generation=(tonumber(self._home_cover_generation) or 0)+1
@@ -10951,7 +11070,8 @@ function Plugin:_schedule_home_stats_idle_refresh(delay)
         end
         local cache=self:_home_weread_stats_cache()
         local now=os.time()
-        local online=show_weread and self:logged_in() and self:_network_radio_hint()~=false
+        local network_ready=self:_network_background_ready()
+        local online=show_weread and self:logged_in() and network_ready==true
         local weekly=type(cache.weekly)=="table" and cache.weekly or nil
         local monthly=type(cache.monthly)=="table" and cache.monthly or nil
         local need_weekly=show_weread and online and self:logged_in() and now-(tonumber(weekly and weekly.fetched_at) or 0)>=10*60
@@ -27558,6 +27678,9 @@ function Plugin:onSuspend()
             "state=",PowerState.state(),"generation=",tostring(PowerState.generation()))
         return
     end
+    -- Fallback snapshot for non-Home/Reader suspend paths. The screensaver hook
+    -- usually records this earlier, before Kobo unloads its Wi-Fi stack.
+    self:_remember_wifi_suspend_intent("onSuspend")
     self:_reconcile_power_leases("pre_suspend")
     local download_continue,download_reason=false,"no_download"
     if self:_passive_prefetch_active() then
@@ -27887,16 +28010,24 @@ function Plugin:onResume()
     self._miuread_suspended=false
     HOME_SESSION.suspended=false
     StatusToast.set_blocked(false)
-    -- Never reuse the pre-suspend Wi-Fi label. Kindle may keep the radio flag
-    -- while association/IP routing is still being restored for several seconds.
-    if self:_network_radio_hint()~=false then
-        require("miuread.network_health").mark_recovering("resume")
-        HomeData.invalidate_device_state()
-        ReaderToolbar.invalidate()
-        self:_wifi_schedule_reconcile("resume",true)
+    -- Ref #92: on Kobo the radio is expected to be OFF at the raw wake edge
+    -- because KOReader unloads Wi-Fi for suspend. Restore the *pre-suspend user
+    -- intent* through KOReader's own network backend instead of interpreting
+    -- that temporary radio-off state as a user choice.
+    local want_wifi=self._wifi_suspend_want_on
+    if want_wifi==nil then
+        local ok_nm,NetworkMgr=pcall(require,"ui/network/manager")
+        if ok_nm and NetworkMgr then want_wifi=NetworkMgr.wifi_was_on==true end
+    end
+    self._wifi_suspend_want_on=nil
+    self._wifi_suspend_intent_at=nil
+    if want_wifi==true then
+        self:_wifi_resume_recover("resume")
     else
         require("miuread.network_health").clear()
         HomeData.invalidate_device_state()
+        ReaderToolbar.invalidate()
+        logger.info("[MiuRead][WiFi] resume restore skipped","reason=user_intent_off")
     end
     -- ExtensionTask owns a stable-network retry gate. It never starts a
     -- transport directly on the raw wake edge, and WAIT_NETWORK can recover

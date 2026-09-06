@@ -2055,6 +2055,22 @@ function DownloadTask:start(book, options, on_progress, on_done, restart_count)
     if self.job or self.hibernated then return false, "已有下载任务正在运行" end
     if not self:available() then return false, "当前 KOReader 不支持下载子进程" end
 
+    -- Ref #91: the failing KPW6 started a fresh worker with ~95 MiB available
+    -- and was killed immediately afterwards. A fresh worker duplicates Lua
+    -- state before it reaches a checkpoint, so reject that unsafe edge instead
+    -- of deliberately driving the whole KOReader process into OOM.
+    collectgarbage("collect")
+    local memory=RuntimePressure.memory_snapshot(true)
+    local minimum=math.max(1,tonumber(Config.HEAVY_DOWNLOAD_START_MIN_KB) or 96*1024)
+    if memory and tonumber(memory.available_kb or 0)<minimum then
+        RuntimePressure.activate("download_start_low_memory",
+            tonumber(Config.PERFORMANCE_MEMORY_PROTECT_SECONDS) or 30*60,"global")
+        logger.warn("[MiuRead][HeavyGuard] download start deferred",
+            "reason=low_memory","memory_kb=",tostring(memory.available_kb),
+            "minimum_kb=",tostring(minimum),"book=",tostring(book and book.bookId or ""))
+        return false,"当前可用内存较低，已暂缓启动下载以避免 KOReader 被系统终止。请关闭其他界面后再试，已有断点不会丢失。"
+    end
+
     local stamp = tostring(os.time()) .. "-" .. tostring(math.random(10000, 99999))
     local progress_path = self.store.temp_dir .. "/download-progress-" .. stamp .. ".json"
     local result_path = self.store.temp_dir .. "/download-result-" .. stamp .. ".json"
