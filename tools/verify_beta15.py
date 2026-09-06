@@ -20,7 +20,7 @@ def sha256(p):
 cfg=text(MIU/'config.lua'); main=text(PLUGIN/'main.lua'); store=text(MIU/'store.lua')
 dl=text(MIU/'extension_download.lua'); ins=text(MIU/'extension_install.lua'); job=text(MIU/'extension_job.lua'); center=text(MIU/'extension_center.lua'); catalog=text(MIU/'extension_catalog.lua')
 
-ok('VERSION = "5.8.0-beta.14"' in cfg,'version is 5.8.0-beta.14')
+ok('VERSION = "5.8.0-beta.15"' in cfg,'version is 5.8.0-beta.15')
 ok('SCHEMA = 132' in cfg,'schema is 132')
 for old in ['extension_transfer.lua','extension_verifier.lua','extension_package.lua','extension_installer.lua','extension_task.lua']:
     ok(not (MIU/old).exists(),f'legacy module removed: {old}')
@@ -31,13 +31,13 @@ for token in ['miuread.extension_transfer','miuread.extension_verifier','miuread
     ok(token not in '\n'.join(text(p) for p in PLUGIN.rglob('*.lua')),f'no runtime require/reference to {token}')
 
 # Download policy invariants.
-ok('local LARGE_RESUME_BYTES=16*1024*1024' in dl,'large-file resume threshold is 16 MiB')
-ok('local out={direct}' in dl and 'for _,route in ipairs(configured) do out[#out+1]=route end' in dl,'automatic source order starts direct then all configured mirrors')
+ok('local LARGE_FILE_BYTES=tonumber(Config.EXTENSION_LARGE_FILE_BYTES)' in dl and 'local RESUME_BYTES=tonumber(Config.EXTENSION_RESUME_BYTES)' in dl,'beta.15 has separate large-file and resumable-partial thresholds')
+ok('EXTENSION_DOWNLOAD_ROUTES' in cfg and 'mirrors.git-zh.com' in cfg and 'preferred = true' in cfg,'GitHub Chinese community route is configured as preferred transport')
 ok('if custom_route then out[#out+1]=custom_route end' in dl,'custom source is last automatic fallback')
-ok('while #routes>3' not in dl and 'route_score' not in dl and 'ttfb' not in dl.lower(),'no route scoring or 3-source truncation')
+ok('route_score' not in dl and 'ttfb' not in dl.lower(),'legacy historical route-score/TTFB ranking remains removed')
 ok('return {}' in dl and 'mode:match("^mirror:%d+$")' in dl,'manual invalid source fails closed')
 ok('source-"..U.id_name(route.key)..".part' in dl,'partials are source-local')
-ok('copy' not in re.sub(r'copy_file_stream','',dl[dl.find('local function source_part'):dl.find('function M.run')]),'source identity helper does not copy partials across routes')
+ok('import_resume_partial' in dl and 'cross-route resume seed copied' in dl,'verified asset identity can seed cross-route Range resume without deleting the original checkpoint')
 ok('validate_download(part,spec)' in dl and 'verify_kind=="sha_unavailable"' in dl,'source completion is integrity-gated')
 ok('expected>0 and size~=expected' in dl and 'actual~=expected_sha' in dl,'size and SHA-256 are both enforced')
 ok('local curl_available=command_available("curl")' in dl and 'transport=koreader_http' in dl and 'transport=curl' in dl,'KOReader HTTP primary with curl fallback retained')
@@ -119,7 +119,7 @@ ok('os.execute(' not in wifi_slice,'MiuRead Wi-Fi recovery does not execute netw
 sync=text(MIU/'sync.lua'); source_pos=text(MIU/'source_position.lua'); precise=text(MIU/'precise_position.lua')
 service=text(MIU/'read_report_service.lua'); legacy=text(MIU/'legacy'/'read_report_worker.lua')
 meta=text(PLUGIN/'_meta.lua')
-ok('version = "5.8.0-beta.14"' in meta,'plugin metadata version is beta.14')
+ok('version = "5.8.0-beta.15"' in meta,'plugin metadata version is beta.15')
 ok('if schema<132' in store and 'partial_catalogs_promoted' in store,'schema 132 migrates partial catalog trust safely')
 ok('schema132_hash_verified' in store and 'core_map_hash' in store,'legacy partial catalog promotion is hash-gated')
 ok('read_report_enabled=true' in downloader and 'read_report_enabled=not partial_range' not in downloader,'new partial downloads keep time-only reporting enabled')
@@ -189,7 +189,47 @@ ok('function Plugin:_progress_position_fingerprint' in main and 'progress_resolu
 ok('function Plugin:_resume_remembered_local_progress' in main and '继续此前已选择的本机位置，不重复询问' in main,'#97: the same pending local position resumes without repeated conflict prompts')
 ok('progress_resolution_choice","progress_resolution_fingerprint","progress_resolution_at' in store,'#97: remembered conflict decision survives session persistence/merge')
 ok('active.key=="home_metadata"' in main and 'active.key=="home_cover"' in main and 'active.key=="home_cover_render"' in main,'#97: user interaction also yields optional metadata/cover work on low-memory Kindles')
-ok('SCHEMA = 132' in cfg,'beta.14 keeps schema 132')
+ok('SCHEMA = 132' in cfg,'beta.15 keeps schema 132')
+
+# beta.15 extension transport and cloud-write priority.
+digests=text(MIU/'digests.lua')
+ok('EXTENSION_CONNECT_TIMEOUT_SECONDS = 20' in cfg,'extension connect/DNS timeout widened to 20s')
+ok('EXTENSION_STALL_SECONDS = 90' in cfg,'extension reconnect waits for a 90s true stall')
+ok('--speed-limit 1 --speed-time' in dl,'slow-but-moving curl transfers are not killed at 1 KiB/s')
+ok('--max-time' not in dl[dl.find('local function write_transport_script'):dl.find('local function run_curl')],'full curl download has no wall-clock completion timeout')
+ok('expected>=LARGE_FILE_BYTES' in dl and 'transport=curl' in dl,'large packages bypass byte-zero KOReader HTTP and use resumable curl')
+ok('probe_route' in dl and '--range 0-' in dl and 'probe_speed_bps' in dl,'fresh large packages perform bounded route probing')
+ok('EXTENSION_PROBE_MAX_ROUTES = 3' in cfg and 'EXTENSION_PROBE_CONNECT_TIMEOUT_SECONDS = 4' in cfg and 'EXTENSION_PROBE_MAX_SECONDS = 5' in cfg,'route probing is capped to the first 3 high-value routes and at most 5s each')
+ok('position<=probe_max' in dl and 'if not route._probe_attempted then return 2' in dl,'unprobed proxy fallbacks remain available after the bounded speed race')
+ok('biggest>=RESUME_BYTES' in dl,'meaningful existing partial outranks fresh route speed probing')
+ok('waiting_network=true' in dl and '断点已保留' in dl,'transient transport failures park the task with its checkpoint')
+ok('sha256_file(path,256*1024)' in dl and 'function D.sha256_file' in digests,'large SHA-256 has a bounded-memory in-process fallback')
+ok('release_package_candidates' in catalog and 'github-release-asset' in catalog,'GitHub Release assets are discovered dynamically without source guessing')
+ok('多个同等候选安装包，需要选择' in catalog and '选择官方 Release 安装包' in center,'ambiguous official assets are surfaced for explicit user choice')
+ok('probe_source_installability' in center and '/contents?ref=' in center,'source installability is confirmed through GitHub Contents API')
+ok('source_installable' not in catalog,'source fallback no longer depends on per-plugin allow-list flags')
+ok('github-source-verified' in catalog and 'source_probe.installable~=true' in catalog,'source ZIP requires positive plugin-structure evidence')
+ok('没有改用源码包，以免把网络失败误判成无 Release' in center,'GitHub/API failure never silently downgrades to source ZIP')
+ok('source_kind=="github-release-asset" or source_kind=="github-source-verified"' in center,'persisted dynamic tasks accept only verified release/source identities')
+ok('中文社区优先，大文件有界测速' in center and '正式安装包身份没有改变' in center,'extension UI describes the beta.15 transport/identity model instead of the old fixed-order model')
+ok('ROUTE_HEALTH_TTL=6*60*60' in job and '_remember_route_health' in job,'recent successful download route is cached with a short TTL')
+ok('paused_priority=true' in job and 'sync_priority' in job,'extension downloads have a dedicated cloud-sync priority pause')
+ok('cloud_sync_priority=true' in dtask,'book downloads recognize cloud-sync priority as a transient pause reason')
+ok('function Plugin:_critical_transfer_begin' in main and 'function Plugin:_critical_transfer_end' in main,'host owns one shared critical network lane for cloud writes')
+ok('self.download_task.pause' in main and 'self.extension_task.pause' in main,'critical cloud writes pause both book and extension transfers')
+ok('self.download_task.resume' in main and 'self.extension_task.resume' in main,'downloads resume after the cloud-write lane is released')
+ok('download pause acknowledgement timed out' in sync and 'elapsed>=3' in sync,'critical progress write never waits indefinitely for download pause acknowledgement')
+ok('annotation_delete' in main and 'annotation_sync_all' in main and 'annotation_manual' in main,'annotation writes also acquire the critical network lane')
+ok('reading_end' in main and 'transfer_priority_started' in main,'reader finalization acquires and releases download priority')
+ok('estimated_unpacked_bytes = 180 * 1024 * 1024' in catalog and 'max_plugin_bytes = 256 * 1024 * 1024' in catalog,'Pinyin large expanded payload is allowed by installer safety limits')
+ok('required_free_bytes = 220 * 1024 * 1024' in catalog,'Pinyin preflight retains its 220 MiB free-space guard')
+quick_order=re.search(r'local HOME_ACTION_ITEM_ORDER=\{([^\n]+)\}',main)
+quick_default=re.search(r'local HOME_ACTION_ITEM_DEFAULT=\{([^\n]+)\}',main)
+ok(bool(quick_order) and bool(quick_default)
+   and quick_order.group(1).startswith('\"refresh\",\"search\",\"downloads\",\"sync\",\"sleep\",\"miuread_settings\"')
+   and all(token in quick_default.group(1) for token in ['refresh=true','search=true','downloads=true','sync=true','sleep=true','miuread_settings=true'])
+   and 'mp=' not in quick_default.group(1) and 'public' not in quick_default.group(1).lower(),
+   'beta.15 keeps exactly the six recommended quick actions and does not reintroduce a public-account shortcut')
 
 # Syntax-check every shipped Lua source.
 texluac=Path('/usr/bin/texluac')
@@ -206,7 +246,7 @@ if texluac.exists():
 # Dynamic regression tools that are portable under texlua.
 texlua=Path('/usr/bin/texlua')
 if texlua.exists():
-    for tool in ['test_extension_catalog.lua','test_extension_download.lua','test_extension_install.lua','test_store_repair.lua']:
+    for tool in ['test_extension_catalog.lua','test_extension_download.lua','test_extension_install.lua','test_store_repair.lua','test_digest_stream.lua']:
         r=subprocess.run([str(texlua),str(ROOT/'tools'/tool)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**__import__('os').environ,'TERM':'xterm'})
         ok(r.returncode==0,f'dynamic regression passes: {tool}')
         if r.returncode:

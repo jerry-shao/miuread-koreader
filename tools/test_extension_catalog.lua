@@ -52,3 +52,46 @@ for _,id in ipairs({'anki','zotero','highlightsync'}) do
     assert(e.package==nil,id..': must not guess an unverified package')
 end
 print('extension_catalog deterministic packages: PASS ('..tostring(packages)..' catalog packages)')
+
+
+-- beta.15 dynamic GitHub Release asset discovery: official ZIPs only, digest
+-- propagated when GitHub provides it, and ties are surfaced instead of guessed.
+local dynamic={repo='owner/demo.koplugin',install_dirname='demo.koplugin'}
+local rel={tag_name='v2.0.0',assets={
+    {name='Source code.zip',browser_download_url='https://github.com/owner/demo.koplugin/archive/v2.zip',size=111,content_type='application/zip'},
+    {name='demo.koplugin-v2.0.0.zip',browser_download_url='https://github.com/owner/demo.koplugin/releases/download/v2/demo.koplugin-v2.0.0.zip',size=222,digest='sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',content_type='application/zip'},
+}}
+local ds,derr,dc=C.release_package_source(dynamic,rel,nil)
+assert(ds and not derr,'dynamic release source should resolve')
+assert(ds.asset_name=='demo.koplugin-v2.0.0.zip','dynamic release selected wrong asset')
+assert(ds.size==222 and ds.sha256==string.rep('a',64),'dynamic release metadata not propagated')
+assert(ds.allow_missing_sha==false,'digest-backed release must require SHA')
+assert(type(dc)=='table' and #dc==1,'source/checksum assets should be filtered')
+
+-- Do not treat the ordinary word 'resources' as a source-code archive just
+-- because it contains the substring 'source'. This guards generic asset names.
+local resource_rel={tag_name='v2.1',assets={{name='demo-resources.koplugin.zip',browser_download_url='https://github.com/owner/demo.koplugin/releases/download/v2.1/demo-resources.koplugin.zip',size=444,content_type='application/zip'}}}
+local resource_src=assert(C.release_package_source(dynamic,resource_rel,nil))
+assert(resource_src.asset_name=='demo-resources.koplugin.zip','resources-named plugin asset was incorrectly filtered as source code')
+
+local oldrel={tag_name='v1',assets={{name='demo.koplugin.zip',browser_download_url='https://github.com/owner/demo.koplugin/releases/download/v1/demo.koplugin.zip',size=333,content_type='application/zip'}}}
+local oldsrc=assert(C.release_package_source(dynamic,oldrel,nil))
+assert(oldsrc.allow_missing_sha==true and oldsrc.sha256=='','old GitHub release without digest should use archive validation fallback')
+
+local tie={tag_name='v3',assets={
+    {name='demo.koplugin-a.zip',browser_download_url='https://github.com/owner/demo.koplugin/releases/download/v3/demo.koplugin-a.zip',size=100,content_type='application/zip'},
+    {name='demo.koplugin-b.zip',browser_download_url='https://github.com/owner/demo.koplugin/releases/download/v3/demo.koplugin-b.zip',size=101,content_type='application/zip'},
+}}
+local ts,te,tc=C.release_package_source(dynamic,tie,nil)
+assert(ts==nil and te=='最新 Release 有多个同等候选安装包，需要选择','ambiguous release must not be guessed')
+assert(type(tc)=='table' and #tc==2,'ambiguous release candidates should be returned to UI')
+
+-- Generic source fallback is evidence-driven, not a per-plugin allow-list.
+local probe={installable=true,branch='master',path=''}
+local ss,se=C.source_package_source(dynamic,{default_branch='master',source_probe=probe},probe)
+assert(ss and not se,'verified source fallback should resolve')
+assert(ss.source=='github-source-verified' and ss.url:find('/archive/refs/heads/master.zip',1,true),'verified source fallback URL incorrect')
+local blocked,berr=C.source_package_source(dynamic,{default_branch='master'},{installable=false})
+assert(blocked==nil and tostring(berr):find('尚未确认',1,true),'unverified source must remain blocked')
+
+print('extension_catalog beta15 release/source policy: PASS')

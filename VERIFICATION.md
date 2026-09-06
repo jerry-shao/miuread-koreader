@@ -1,76 +1,85 @@
-# 5.8.0-beta.14 verification
+# 5.8.0-beta.15 verification
 
-Scope: close the #93 public-account navigation regression and the #97 KPW5 Home/read-report/progress/network-state regressions without changing the beta.13 chapter/partial-book progress algorithm, downloader, extension installer, OTA flow, or KOReader native Reader plumbing.
+Scope: rebuild extension package resolution and large-file transport so slow GitHub downloads can finish without changing package identity, while giving critical reading-data cloud writes priority over background book/plugin downloads. Keep beta.13 exact-position math and beta.14 public-account navigation unchanged.
 
-## #93 — public-account navigation
+## Extension package identity
 
-- Home quick actions include **公众号** by default; the action layout supports seven visible items and preserves user customization.
-- `书架 → 公众号` is populated from WeRead public-account rows, even when no public-account article has been cached locally.
-- `本机 → 公众号` remains local cached public-account articles; account collections and local articles are not conflated.
-- Selecting the public-account source with no cached account list requests one refresh while retaining any previous cache on failure.
-- A public-account article opened in Reader routes `更多` to the public-account reader menu first, exposing `返回文章列表 / 上一篇 / 下一篇 / 当前文章 / 全部阅读功能`.
-- `返回文章列表` returns to the current public account's article list.
+- GitHub Release remains the authority for an official package's version, asset URL, size and digest.
+- A transport failure never changes an official Release asset into `archive/refs/tags/*.zip` or `main.zip`.
+- Catalog-pinned packages remain deterministic. Known unpinned repositories may resolve the latest official Release dynamically.
+- Release asset selection filters non-ZIP/checksum/debug/source artifacts. If the top official candidates tie, the UI asks the user instead of guessing.
+- Source archives are considered only after GitHub proves that no usable Release asset exists and the Contents API positively proves `main.lua + _meta.lua` at the repository root or in one unambiguous `.koplugin` directory.
+- GitHub/API/network failure is never interpreted as “no Release”.
 
-## #97 — Home interaction and refresh semantics
+## Extension transport v5
 
-- Single-click Home refresh never opens the local-library folder chooser. An unconfigured local library shows a message instead; folder selection remains an explicit settings/file-management action.
-- The Sync quick action no longer displays a fixed “submitted” notice. Its visible state is produced by the real pending/sync state.
-- On low-memory devices, direct user interaction can cancel optional Home metadata/cover work in addition to statistics/shelf-summary work. Downloads and actual sync transactions are not cancelled by this rule.
+- Automatic route order begins with **GitHub 中文社区** (`mirrors.git-zh.com`), with GitHub official, ghfast, gh-proxy and ghproxy.net retained as fallbacks for the exact same official asset.
+- Large packages (>= 5 MiB) use resumable curl directly instead of first spending a full Lua-HTTP attempt.
+- Connection/DNS timeout is 20 s. The old “below 1 KiB/s for 35 s” kill rule is removed; curl only reconnects after approximately 90 s of essentially zero transfer.
+- Full package downloads have no wall-clock completion deadline.
+- Fresh large downloads probe at most the first three high-value routes, 128 KiB each, with a 4 s connect / 5 s total cap per probe. Successful probes sort by measured throughput; unprobed proxies remain fallbacks; freshly failed probes move behind them.
+- A meaningful existing partial (>= 512 KiB) outranks a fresh speed race.
+- A partial may seed another route only for the same package identity. The original route-local checkpoint is preserved. A Range rejection can restart the new route without deleting the original checkpoint.
+- Recent successful route identity is cached for six hours as a tie-breaker / small-package preference.
+- Transient DNS/connect/TLS/transport failures park the task in a recoverable state with its checkpoint instead of exhausting/recreating the package.
 
-## #97 — Wi-Fi state consistency
+## Integrity and install transaction
 
-- A real NetworkManager association with a Kindle SSID immediately exits stale `recovering` presentation state.
-- Association state and Internet reachability remain separate, so an associated network can be shown correctly even while Internet probing is still pending/failing.
-- Home and Reader therefore no longer intentionally disagree merely because the previous recovery phase has not timed out.
+- Exact asset size is checked whenever GitHub provides it.
+- SHA-256 is checked whenever the Release/catalog provides a digest.
+- If shell digest tools are unavailable, MiuRead now hashes files incrementally in 256 KiB chunks; 60+ MiB archives are not read into the Lua heap as one string.
+- Older official assets without a digest still require size (when known), valid archive traversal and plugin-structure validation before installation.
+- KOReader Archiver remains the ZIP authority; path traversal/symlink/file-count/expanded-size checks remain in the single installer path.
+- `main.lua` and `_meta.lua` markers remain mandatory.
+- Installation continues to stage the new plugin, journal the switch, back up the old directory and roll back on failure/interruption.
+- Pinyin IME v1.2.0 remains pinned to the official 63,312,207-byte Release asset and SHA-256 `14047ed2638c32637c1dbc831f676967a221548f435443815b1c223881f4bbcb`; the 220 MiB free-space preflight and expanded-size allowance remain active.
 
-## #97 — read-report worker health
+## Persistent task and sleep behavior
 
-- Read-report service version is **28**.
-- The child service writes a lightweight heartbeat outside blocking WeRead report calls.
-- The parent distinguishes startup grace, idle-stall timeout, and legitimate in-flight HTTP reporting timeout.
-- A living-but-stalled service is retired and restarted automatically, with a bounded number of automatic restarts.
-- Restart does **not** replay an interval whose network dispatch outcome is unknown.
-- Writer-barrier callers receive a cancellation result when a stuck service is restarted, so they cannot remain blocked on a dead generation.
+- Download task identity includes official URL, version, size and SHA-256; restart only resumes a task whose identity still matches the current package.
+- Pause/cancel retain partial data; only **删除下载数据** removes the task directory/checkpoints.
+- A fully downloaded package is revalidated before reuse and can continue local installation offline.
+- Real suspend pauses unsupported background transfers without losing partial data; screen-saver/download-hold modes can retain the worker where the existing device power layer permits it.
+- A stale `paused_priority` after KOReader restart becomes an automatically recoverable network-wait state so a dead sync owner cannot strand the task.
 
-## #97 — progress priority and conflict persistence
+## Critical cloud-write priority
 
-- The exact final `chapter + co` position is persisted locally before network-dependent finalization.
-- Reading-end gives an already-running reading-time writer only a short **4-second** handoff window. If it is still busy, progress is parked durably for later recovery instead of blocking suspend/Home for tens of seconds or writing concurrently.
-- The foreground progress writer fence is bounded to **8 seconds**; an uncertain in-flight reading-time request is never killed and blindly replayed.
-- Choosing **使用本机位置** stores an exact-position fingerprint. The same unresolved local position resumes its saved upload/verification transaction after resume rather than showing the same cloud-conflict question again.
-- A genuinely new local position, a remote-position choice, or successful cloud verification clears/replaces that remembered decision as appropriate.
+- Reading-end progress, manual progress and annotation writes acquire one shared critical network lane.
+- Book downloads pause with `cloud_sync_priority`; extension downloads pause with `paused_priority` / `sync_priority` and preserve checkpoints.
+- Critical progress waits at most about three seconds for transfer-pause acknowledgement, then proceeds; a slow downloader cannot block cloud state indefinitely.
+- Only transfers paused by the critical lane are resumed when the lane is released.
+- ReadReport v28 writer-fence / uncertainty rules remain intact: an unknown reading-time request is not killed and blindly replayed.
 
 ## Regression boundary
 
-beta.14 intentionally keeps schema **132** and does not replace:
+beta.15 intentionally keeps schema **132**, ReadReport **v28**, and does not replace:
 
-- beta.13 standalone/partial EPUB whole-book progress conversion;
-- exact WeRead `chapter + co` encoding/verification;
-- download/extension installation transactions;
-- Kindle/Kobo background download implementation;
-- OTA/update transport;
+- beta.13 standalone/partial EPUB whole-book conversion and exact WeRead `chapter + co` encoding;
+- beta.14 public-account shelf/account/article separation and Reader return/prev/next navigation;
+- the six recommended Home quick actions (`刷新 / 搜索 / 下载 / 同步 / 休眠 / 设置`) — **公众号 is not reintroduced there**;
+- core OTA package logic;
 - KOReader native typography/CRE/input behavior.
 
 ## Automated verification
 
-- `python tools/verify_beta14.py`: **120/120 passed**.
+- `python tools/verify_beta15.py`: **152/152 passed**.
 - Shipped Lua syntax: **136/136 passed** using `texluac -p`.
-- Extension catalog regression: PASS.
-- Extension download fault model: PASS.
-- Extension installer transaction/rollback/path-safety model: PASS.
+- Dynamic extension catalog selection/source-fallback regression: PASS.
+- Dynamic extension download integrity/route-identity regression: PASS.
+- Dynamic extension installer transaction/rollback/path-safety regression: PASS.
 - Store migration/compaction regression: PASS.
-- beta.13 partial/standalone progress regression checks: PASS.
-- #93 Home/account/Reader navigation checks: PASS.
-- #97 refresh/Wi-Fi/read-report-health/progress-priority/conflict-persistence checks: PASS.
+- Streaming SHA-256 regression against system `sha256sum`: PASS.
+- beta.13 exact partial/standalone progress regression checks: PASS.
+- beta.14 #93/#97 regression checks: PASS.
+- beta.15 cloud-write/download-priority invariants: PASS.
 
-## Real-device validation still required
+## Real-device/network validation still required before stable promotion
 
-Static, syntax, and deterministic regression tests cannot emulate Kindle scheduling, Wi-Fi firmware behavior, or WeRead server timing. Before stable promotion, KPW5/KPW6 real-device verification should cover:
+The build environment cannot emulate Kindle Wi-Fi/CDN behavior or WeRead server timing. The implementation is complete, but stable promotion should still exercise these external conditions on hardware:
 
-1. Home → 公众号 → account → article → Reader → 返回文章列表.
-2. An account with zero locally cached articles still appears in `书架 → 公众号`; `本机 → 公众号` remains empty until an article is cached.
-3. KPW5 continuous reading for at least two hours, then Home/suspend; compare WeRead reading time and final cloud location.
-4. Force/observe a slow read-report call; Home/suspend must not wait tens of seconds, and the final exact position must recover later without duplicate time replay.
-5. Choose local progress once during a conflict, suspend/resume before cloud confirmation, and verify the same exact position is not prompted again.
-6. Resume Wi-Fi on KPW5/KPW6: once SSID association is visible, Home must stop showing `恢复中`.
-7. On an unconfigured local library, tap refresh: it must not open a directory chooser.
+1. Pinyin IME: start the 63.3 MB official Release asset, interrupt at roughly 10%, 50% and 90%, restore Wi-Fi, and confirm the same asset resumes instead of changing to source ZIP.
+2. Let Pinyin run through an extended very-slow interval; moving bytes must not trigger the former 1 KiB/s / 35 s failure.
+3. Verify the GitHub Chinese Community Release route on the target network. If it is unavailable or returns altered/truncated data, MiuRead must reject it and continue with another transport while preserving official size/digest identity.
+4. Background-download book A or Pinyin while reading book B; close/suspend book B and confirm exact progress / annotations reach WeRead before the download resumes.
+5. Kindle screen-off download; where the existing hold mode is active, the transfer should continue. On devices that truly suspend networking, wake should resume from the checkpoint.
+6. Regression-check `书架 → 公众号 → account → article → 返回文章列表` and confirm the Home quick bar still has no dedicated 公众号 button.

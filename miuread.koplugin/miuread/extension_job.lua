@@ -11,12 +11,14 @@ local ExtensionJob={}
 ExtensionJob.__index=ExtensionJob
 
 local NETWORK_KEY="extension_center_network_v2"
+local ROUTE_HEALTH_KEY="extension_route_health_v1"
+local ROUTE_HEALTH_TTL=6*60*60
 local ACTIVE_STATES={
-    downloading=true,waiting_network=true,paused_user=true,paused_power=true,
+    downloading=true,waiting_network=true,paused_user=true,paused_power=true,paused_priority=true,
     interrupted=true,verifying=true,extracting=true,installing=true,downloaded=true,
 }
 local RESUMABLE_STATES={
-    waiting_network=true,paused_user=true,paused_power=true,interrupted=true,
+    waiting_network=true,paused_user=true,paused_power=true,paused_priority=true,interrupted=true,
     cancelled=true,failed=true,downloaded=true,
 }
 
@@ -147,7 +149,7 @@ function ExtensionJob:new(store)
     local o=setmetatable({
         store=store,root=root,session=tostring(os.time()).."-"..tostring(math.random(100000,999999)),
         current=nil,worker_pid=nil,poll_task=nil,network_retry_task=nil,network_ready_since=nil,on_progress=nil,on_done=nil,
-        resume_generation=0,last_progress_signature=nil,
+        resume_generation=0,last_progress_signature=nil,transient_retry_count=0,
     },self)
     o:_startup_reap()
     o:_adopt_latest_active()
@@ -196,6 +198,15 @@ function ExtensionJob:_startup_reap()
                 self:_save(task)
                 os.remove(path.."/owner.json")
                 logger.warn("[MiuRead][ExtensionJob] stale task reaped","task=",tostring(task.task_id),"owner_session=",tostring(owner.session or "-"))
+            elseif state=="paused_priority" then
+                -- A cloud-sync priority pause cannot survive a KOReader restart:
+                -- the sync owner is gone, so convert it into an automatically
+                -- resumable network wait instead of stranding the plugin task.
+                task.state="waiting_network"; task.stage="waiting_network"
+                task.message="上次阅读数据同步已结束，准备继续插件下载"
+                task.worker_pid=nil
+                self:_save(task)
+                os.remove(path.."/owner.json")
             elseif state=="installing" then
                 safe_kill_transport(path)
                 safe_kill_owned_worker(owner)
@@ -306,7 +317,22 @@ end
 function ExtensionJob:_network_settings()
     local value=self.store:get(NETWORK_KEY,{mode="auto",custom_prefix=""})
     value=type(value)=="table" and value or {mode="auto",custom_prefix=""}
-    return {mode=tostring(value.mode or "auto"),custom_prefix=tostring(value.custom_prefix or "")}
+    local health=self.store:get(ROUTE_HEALTH_KEY,{})
+    health=type(health)=="table" and health or {}
+    local updated=tonumber(health.updated_at) or 0
+    local preferred=(os.time()-updated)<=ROUTE_HEALTH_TTL and tostring(health.route_key or "") or ""
+    return {
+        mode=tostring(value.mode or "auto"),custom_prefix=tostring(value.custom_prefix or ""),
+        preferred_route_key=preferred,
+    }
+end
+
+function ExtensionJob:_remember_route_health(route_key)
+    route_key=trim(route_key)
+    if route_key=="" or route_key=="cached" then return false end
+    self.store:set_deferred(ROUTE_HEALTH_KEY,{route_key=route_key,updated_at=os.time()})
+    self.store:flush()
+    return true
 end
 
 function ExtensionJob:_emit_progress(force)
@@ -366,6 +392,8 @@ function ExtensionJob:_poll()
     if type(result)~="table" then result={ok=false,error="扩展下载进程没有返回结果",kind="interrupted"} end
 
     if result.ok==true and result.path then
+        self.transient_retry_count=0
+        task.transient_retry_count=0
         task.state="downloaded"; task.stage="downloaded"; task.package_path=result.path
         task.downloaded_bytes=tonumber(result.bytes) or U.file_size(result.path) or 0
         task.total_bytes=tonumber(task.size) or 0
@@ -373,6 +401,7 @@ function ExtensionJob:_poll()
         task.used_url=tostring(result.used_url or result.route_url or task.source_url or "")
         task.route_key=tostring(result.route_key or "")
         task.transport=tostring(result.transport or "")
+        self:_remember_route_health(task.route_key)
         task.message="下载并校验完成，准备安装"
         self:_save(task); self.current=task; self:_emit_progress(true)
         local done_cb=self.on_done
@@ -399,9 +428,15 @@ function ExtensionJob:_poll()
     task.downloaded_bytes=partial_bytes
     if result.waiting_network==true then
         task.state="waiting_network"; task.stage="waiting_network"
-        task.message="等待网络，已保存下载进度"
+        task.message=task.downloaded_bytes>0 and "下载暂时中断，断点已保留，稍后自动继续" or "等待可用下载线路"
+        self.transient_retry_count=math.min(8,(tonumber(task.transient_retry_count) or tonumber(self.transient_retry_count) or 0)+1)
+        task.transient_retry_count=self.transient_retry_count
+        local Config=require("miuread.config")
+        local base=math.max(4,tonumber(Config.EXTENSION_RETRY_BASE_SECONDS) or 10)
+        local ceiling=math.max(base,tonumber(Config.EXTENSION_RETRY_MAX_SECONDS) or 60)
+        local delay=math.min(ceiling,base*(2^math.max(0,self.transient_retry_count-1)))
         self:_save(task); self.current=task; self:_emit_progress(true)
-        self:_schedule_network_retry(4.0)
+        self:_schedule_network_retry(delay)
         return
     end
     task.state="failed"; task.stage="error"; task.message="下载未完成"
@@ -464,7 +499,9 @@ function ExtensionJob:_spawn(task,spec)
     local task_dir=task.task_dir
     local child_spec=U.copy(spec)
     child_spec.network=self:_network_settings()
-    child_spec.mirrors=U.copy(require("miuread.config").GITHUB_MIRRORS or {})
+    local child_config=require("miuread.config")
+    child_spec.mirrors=U.copy(child_config.GITHUB_MIRRORS or {})
+    child_spec.routes=U.copy(child_config.EXTENSION_DOWNLOAD_ROUTES or {})
     local child=function()
         SubprocessHygiene.close_inherited_sockets()
         U.mkdir(task_dir)
@@ -510,7 +547,10 @@ function ExtensionJob:start(spec,on_progress,on_done)
             task_id=id,task_dir=dir,kind="extension",repo=tostring(spec.repo or ""),name=tostring(spec.name or spec.repo or "扩展"),
             version=tostring(spec.version or ""),state="queued",stage="prepare",source_url=tostring(spec.url),
             size=tonumber(spec.size) or 0,sha256=tostring(spec.sha256 or ""),created_at=os.time(),updated_at=os.time(),
-            deterministic=true,asset_name=tostring(spec.asset_name or ""),expected_dir=tostring(spec.expected_dir or ""),
+            deterministic=true,allow_missing_sha=spec.allow_missing_sha==true,
+            asset_name=tostring(spec.asset_name or ""),expected_dir=tostring(spec.expected_dir or ""),
+            layout=tostring(spec.layout or ""),source=tostring(spec.source or ""),channel=tostring(spec.channel or ""),
+            remote_ref=tostring(spec.remote_ref or ""),transient_retry_count=0,
         }
     else
         task.message="继续上次下载"; task.error=nil; task.error_kind=nil
@@ -570,10 +610,19 @@ end
 function ExtensionJob:pause(reason)
     local task=self.current
     if not task then return false,"没有插件下载任务" end
-    self:_kill_worker(reason or "manual_pause")
-    task.state=reason=="power" and "paused_power" or "paused_user"
+    reason=tostring(reason or "manual")
+    self:_kill_worker(reason.."_pause")
+    if reason=="power" then
+        task.state="paused_power"
+        task.message="设备休眠，唤醒联网后自动继续"
+    elseif reason=="sync_priority" or reason=="cloud_sync_priority" then
+        task.state="paused_priority"
+        task.message="阅读数据正在同步，插件下载已保存断点并让路"
+    else
+        task.state="paused_user"
+        task.message="下载已暂停，断点已保留"
+    end
     task.stage=task.state
-    task.message=reason=="power" and "设备休眠，唤醒联网后自动继续" or "下载已暂停，断点已保留"
     task.worker_pid=nil
     self:_save(task); self.current=task; self:_emit_progress(true)
     if reason=="power" then self:_schedule_network_retry(3.0) end
@@ -610,7 +659,9 @@ function ExtensionJob:resume(reason)
     if not RESUMABLE_STATES[tostring(task.state or "")] then return false,"当前任务状态不支持继续" end
     local spec=type(task.spec)=="table" and task.spec or {
         repo=task.repo,name=task.name,version=task.version,url=task.source_url,size=task.size,sha256=task.sha256,
-        deterministic=task.deterministic,asset_name=task.asset_name,expected_dir=task.expected_dir,
+        deterministic=task.deterministic,allow_missing_sha=task.allow_missing_sha==true,
+        asset_name=task.asset_name,expected_dir=task.expected_dir,layout=task.layout,source=task.source,
+        channel=task.channel,remote_ref=task.remote_ref,
     }
     task.message="正在继续下载"
     logger.info("[MiuRead][ExtensionJob] resume","reason=",tostring(reason or "manual"),"task=",tostring(task.task_id))

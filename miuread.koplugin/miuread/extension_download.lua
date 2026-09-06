@@ -1,13 +1,14 @@
--- MiuRead built-in extension downloader v4.
+-- MiuRead built-in extension downloader v5 (beta.15).
 --
--- Deliberately small policy surface:
---   * deterministic source order (official -> configured mirrors -> custom)
---   * one KOReader HTTP attempt and one curl fallback per source
---   * source-local partial files only; partials are never copied across sources
---   * a source is successful only after expected size + SHA-256 validation
+-- Policy:
+--   * the official GitHub Release asset identity never changes while retrying
+--   * large packages probe available transports before starting fresh
+--   * meaningful partials outrank a fresh speed race and may seed another route
+--     for Range resume without destroying the original checkpoint
+--   * slow transfers keep running; only a genuine no-data stall is reconnected
+--   * official size + SHA-256 validate assets before installation when available
 --
--- The installer owns archive/structure validation. This module returns only a
--- byte-for-byte verified local package.
+-- The installer owns archive and KOReader plugin structure validation.
 
 local Config=require("miuread.config")
 local Http=require("miuread.http")
@@ -18,7 +19,8 @@ local ok_socket,socket=pcall(require,"socket")
 
 local M={}
 
-local LARGE_RESUME_BYTES=16*1024*1024
+local LARGE_FILE_BYTES=tonumber(Config.EXTENSION_LARGE_FILE_BYTES) or 5*1024*1024
+local RESUME_BYTES=tonumber(Config.EXTENSION_RESUME_BYTES) or 512*1024
 
 local function now()
     if ok_socket and socket and type(socket.gettime)=="function" then return socket.gettime() end
@@ -53,8 +55,8 @@ local function ensure_dir(path)
 end
 
 local function route_label(key)
-    if key=="direct" then return "GitHub" end
-    if tostring(key):sub(1,7)=="mirror:" then return "镜像 "..tostring(key):sub(8) end
+    if key=="direct" then return "GitHub 官方" end
+    if key=="git_zh" then return "GitHub 中文社区" end
     if key=="custom" then return "自定义镜像" end
     return tostring(key or "下载源")
 end
@@ -66,35 +68,80 @@ local function normalize_prefix(prefix)
     return prefix
 end
 
-function M.build_sources(url,network,mirrors)
-    url=tostring(url or "")
-    network=type(network)=="table" and network or {mode="auto",custom_prefix=""}
-    local direct={key="direct",label="GitHub",url=url,index=1}
-    if not starts_with(url,"https://github.com/") then return {direct} end
+local function build_route_url(url,descriptor)
+    descriptor=type(descriptor)=="table" and descriptor or {}
+    local mode=tostring(descriptor.mode or "prefix")
+    local base=trim(descriptor.base or descriptor.prefix or "")
+    if mode=="direct" then return url end
+    if mode=="replace_host" then
+        local suffix=tostring(url or ""):match("^https://github%.com/(.+)$")
+        if not suffix or base=="" or not base:match("^https://") then return nil end
+        base=base:gsub("/+$","")
+        return base.."/"..suffix
+    end
+    local prefix=normalize_prefix(base)
+    if not prefix then return nil end
+    return prefix..url
+end
 
-    local configured={}
+local function configured_routes(url,routes,mirrors)
+    local out={}
+    if type(routes)=="table" and #routes>0 then
+        for index,descriptor in ipairs(routes) do
+            if type(descriptor)=="table" then
+                local route_url=build_route_url(url,descriptor)
+                if route_url then
+                    local key=trim(descriptor.key)
+                    if key=="" then key="route_"..tostring(index) end
+                    out[#out+1]={
+                        key=key,label=trim(descriptor.label)~="" and trim(descriptor.label) or route_label(key),
+                        url=route_url,index=index,preferred=descriptor.preferred==true,mode=tostring(descriptor.mode or "prefix"),
+                    }
+                end
+            end
+        end
+        return out
+    end
+    -- Compatibility with beta.14 settings/tests and the OTA mirror list.
+    out[#out+1]={key="direct",label="GitHub 官方",url=url,index=1,mode="direct"}
     for index,prefix in ipairs(type(mirrors)=="table" and mirrors or Config.GITHUB_MIRRORS or {}) do
         prefix=normalize_prefix(prefix)
         if prefix then
-            configured[#configured+1]={
-                key="mirror:"..tostring(index),label="镜像 "..tostring(index),url=prefix..url,index=index+1,
-            }
+            out[#out+1]={key="mirror:"..tostring(index),label="镜像 "..tostring(index),url=prefix..url,index=index+1,mode="prefix"}
         end
     end
+    return out
+end
+
+function M.build_sources(url,network,mirrors,routes)
+    url=tostring(url or "")
+    network=type(network)=="table" and network or {mode="auto",custom_prefix=""}
+    if not starts_with(url,"https://github.com/") then return {{key="direct",label="官方下载",url=url,index=1,mode="direct"}} end
+
+    local configured=configured_routes(url,routes or Config.EXTENSION_DOWNLOAD_ROUTES,mirrors)
     local custom=normalize_prefix(network.custom_prefix)
-    local custom_route=custom and {key="custom",label="自定义镜像",url=custom..url,index=100} or nil
+    local custom_route=custom and {key="custom",label="自定义镜像",url=custom..url,index=100,mode="prefix"} or nil
     local mode=tostring(network.mode or "auto")
-    if mode=="direct" then return {direct} end
+    if mode=="direct" then
+        for _,route in ipairs(configured) do if route.key=="direct" then return {route} end end
+        return {{key="direct",label="GitHub 官方",url=url,index=1,mode="direct"}}
+    end
     if mode=="custom" then return custom_route and {custom_route} or {} end
-    if mode:match("^mirror:%d+$") then
-        for _,route in ipairs(configured) do if route.key==mode then return {route} end end
+    local route_key=mode:match("^route:(.+)$")
+    if route_key then
+        for _,route in ipairs(configured) do if route.key==route_key then return {route} end end
         return {}
     end
+    -- Preserve old mirror:N preferences after upgrading from beta.14.
+    if mode:match("^mirror:%d+$") then
+        for _,route in ipairs(configured) do if route.key==mode then return {route} end end
+        local index=tonumber(mode:match("(%d+)$"))
+        local prefix=index and normalize_prefix((type(mirrors)=="table" and mirrors or Config.GITHUB_MIRRORS or {})[index]) or nil
+        return prefix and {{key=mode,label="镜像 "..tostring(index),url=prefix..url,index=index+1,mode="prefix"}} or {}
+    end
 
-    local out={direct}
+    local out={}
     for _,route in ipairs(configured) do out[#out+1]=route end
-    -- A configured custom prefix is an explicit user-provided fallback. In auto
-    -- mode it is tried last, never promoted by historical speed/health data.
     if custom_route then out[#out+1]=custom_route end
     return out
 end
@@ -129,15 +176,13 @@ local function sha256_file(path)
             if value and #value==64 then return value:lower() end
         end
     end
-    -- Small packages have a safe in-process fallback. Large packages deliberately
-    -- avoid reading the entire archive into Lua memory on e-ink devices.
-    local size=U.file_size(path) or 0
-    if size>0 and size<=8*1024*1024 then
-        local raw=U.read_file(path,true)
-        if raw then
-            local ok,D=pcall(require,"miuread.digests")
-            if ok and D and type(D.sha256)=="function" then return D.sha256(raw):lower() end
-        end
+    -- Last resort: MiuRead's bounded streaming SHA-256. Unlike the old fallback
+    -- it never reads a 60+ MiB plugin archive into the Lua heap.
+    local ok,D=pcall(require,"miuread.digests")
+    if ok and D and type(D.sha256_file)=="function" then
+        local value,err=D.sha256_file(path,256*1024)
+        if value and #value==64 then return tostring(value):lower() end
+        return nil,err or "流式 SHA-256 校验失败"
     end
     return nil,"设备缺少可用于大文件的 SHA-256 校验工具"
 end
@@ -152,6 +197,9 @@ local function validate_download(path,spec)
     end
     local expected_sha=trim(spec.sha256):lower():gsub("[^0-9a-f]","")
     if expected_sha=="" then
+        if spec.allow_missing_sha==true then
+            return {size=size,sha256="",integrity="size+archive"}
+        end
         return nil,"内置扩展缺少 SHA-256 目录记录","catalog_integrity"
     end
     local actual,sha_error=sha256_file(path)
@@ -159,7 +207,7 @@ local function validate_download(path,spec)
     if actual~=expected_sha then
         return nil,"SHA-256 校验失败；下载内容与目录记录不一致","sha256"
     end
-    return {size=size,sha256=actual}
+    return {size=size,sha256=actual,integrity="sha256"}
 end
 
 local function progress_writer(task_dir,spec,total_sources)
@@ -197,8 +245,10 @@ local function write_transport_script(task_dir,route,target,resume,connect_timeo
     local status_path=task_dir.."/transport.status"
     local error_path=task_dir.."/transport.error"
     os.remove(pid_path); os.remove(exit_path); os.remove(status_path); os.remove(error_path)
+    -- Treat only a true no-data stall as dead. A Kindle may legitimately stay
+    -- below 1 KiB/s for a while; beta.14 killed those healthy slow transfers.
     local cmd="curl -L --fail --silent --show-error --connect-timeout "..tostring(connect_timeout)
-        .." --speed-limit 1024 --speed-time "..tostring(stall_seconds)
+        .." --speed-limit 1 --speed-time "..tostring(stall_seconds)
     if resume then cmd=cmd.." -C -" end
     cmd=cmd.." -o "..U.shell_quote(target)
         .." -w "..U.shell_quote("%{http_code}")
@@ -221,7 +271,9 @@ local function write_transport_script(task_dir,route,target,resume,connect_timeo
 end
 
 local function run_curl(task_dir,route,target,resume,publish,spec,source_index,total_sources)
-    local info,launch_error=write_transport_script(task_dir,route,target,resume,tonumber(spec.connect_timeout) or 8,tonumber(spec.stall_seconds) or 35)
+    local info,launch_error=write_transport_script(task_dir,route,target,resume,
+        tonumber(spec.connect_timeout) or tonumber(Config.EXTENSION_CONNECT_TIMEOUT_SECONDS) or 20,
+        tonumber(spec.stall_seconds) or tonumber(Config.EXTENSION_STALL_SECONDS) or 90)
     if not info then return nil,{error=launch_error or "curl 启动失败",kind="transport_error"} end
     publish(U.file_size(target) or 0,route,"curl",true,resume and "正在继续同一下载源" or "",source_index)
     local last_size=U.file_size(target) or 0
@@ -291,16 +343,151 @@ local function source_part(task_dir,route)
     return task_dir.."/source-"..U.id_name(route.key)..".part"
 end
 
+local function probe_route(route,spec)
+    if not command_available("curl") then return nil,"curl unavailable" end
+    local bytes=math.max(32*1024,tonumber(spec.probe_bytes) or tonumber(Config.EXTENSION_PROBE_BYTES) or 128*1024)
+    local connect=math.max(2,tonumber(spec.probe_connect_timeout) or tonumber(Config.EXTENSION_PROBE_CONNECT_TIMEOUT_SECONDS) or 6)
+    local max_time=math.max(connect+1,tonumber(spec.probe_max_seconds) or tonumber(Config.EXTENSION_PROBE_MAX_SECONDS) or 10)
+    local cmd="curl -L --fail --silent --show-error --connect-timeout "..tostring(connect)
+        .." --max-time "..tostring(max_time)
+        .." --range 0-"..tostring(bytes-1)
+        .." -o /dev/null -w "..U.shell_quote("%{http_code} %{speed_download} %{size_download}")
+        .." "..U.shell_quote(route.url).." 2>/dev/null"
+    local pipe=io.popen(cmd,"r")
+    if not pipe then return nil,"probe unavailable" end
+    local raw=trim(pipe:read("*a") or "")
+    local ok=pipe:close()
+    local code,speed,size=raw:match("^(%d+)%s+([%d%.]+)%s+([%d%.]+)")
+    code=tonumber(code) or 0; speed=tonumber(speed) or 0; size=tonumber(size) or 0
+    if not ok or (code~=200 and code~=206) or size<=0 then return nil,"probe failed" end
+    return {speed_bps=speed,bytes=size,http_code=code}
+end
+
+local function order_sources(task_dir,sources,spec,expected)
+    if #sources<=1 then return sources end
+    -- A meaningful existing partial is more valuable than a fresh speed race.
+    local partial_rank={}
+    local biggest=0
+    for _,route in ipairs(sources) do
+        local size=U.file_size(source_part(task_dir,route)) or 0
+        partial_rank[route.key]=size
+        if size>biggest then biggest=size end
+    end
+    if biggest>=RESUME_BYTES then
+        table.sort(sources,function(a,b)
+            local aa,bb=partial_rank[a.key] or 0,partial_rank[b.key] or 0
+            if aa~=bb then return aa>bb end
+            if a.preferred~=b.preferred then return a.preferred==true end
+            return (tonumber(a.index) or 999)<(tonumber(b.index) or 999)
+        end)
+        return sources
+    end
+
+    local network=type(spec.network)=="table" and spec.network or {}
+    if tostring(network.mode or "auto")~="auto" then return sources end
+    local health_key=tostring(network.preferred_route_key or "")
+
+    -- For small packages the probe itself can cost more than the download. Use
+    -- the recent successful route first, then the configured preference order.
+    if expected<LARGE_FILE_BYTES or not command_available("curl") then
+        if health_key~="" then
+            table.sort(sources,function(a,b)
+                local ah,bh=a.key==health_key,b.key==health_key
+                if ah~=bh then return ah end
+                if a.preferred~=b.preferred then return a.preferred==true end
+                return (tonumber(a.index) or 999)<(tonumber(b.index) or 999)
+            end)
+        end
+        return sources
+    end
+
+    -- Probe only the first few high-value routes. A sequential five-route
+    -- speed race can itself cost tens of seconds on a slow Kindle. Successful
+    -- probes are ordered by measured speed; unprobed routes remain normal
+    -- fallbacks; routes that just failed a probe are tried last.
+    local probe_max=math.max(1,tonumber(spec.probe_max_routes)
+        or tonumber(Config.EXTENSION_PROBE_MAX_ROUTES) or 3)
+    for position,route in ipairs(sources) do
+        route._probe_position=position
+        if position<=probe_max then
+            route._probe_attempted=true
+            local result=probe_route(route,spec)
+            if result then
+                route._probe_ok=true
+                route.probe_speed_bps=result.speed_bps
+                logger.info("[MiuRead][ExtensionDownload] route probe","source=",route.key,
+                    "speed_bps=",tostring(math.floor(result.speed_bps+.5)),"code=",tostring(result.http_code))
+            else
+                route._probe_ok=false
+                route.probe_speed_bps=0
+                logger.info("[MiuRead][ExtensionDownload] route probe unavailable","source=",route.key)
+            end
+        end
+    end
+    local function probe_group(route)
+        if route._probe_attempted and route._probe_ok then return 1 end
+        if not route._probe_attempted then return 2 end
+        return 3
+    end
+    table.sort(sources,function(a,b)
+        local ag,bg=probe_group(a),probe_group(b)
+        if ag~=bg then return ag<bg end
+        if ag==1 then
+            local aa,bb=tonumber(a.probe_speed_bps) or 0,tonumber(b.probe_speed_bps) or 0
+            if aa~=bb then return aa>bb end
+        end
+        local ah,bh=a.key==health_key,b.key==health_key
+        if ah~=bh then return ah end
+        if a.preferred~=b.preferred then return a.preferred==true end
+        return (tonumber(a._probe_position) or tonumber(a.index) or 999)
+            <(tonumber(b._probe_position) or tonumber(b.index) or 999)
+    end)
+    for _,route in ipairs(sources) do
+        route._probe_position=nil; route._probe_attempted=nil; route._probe_ok=nil
+    end
+    return sources
+end
+
+local function best_other_partial(task_dir,sources,current,expected)
+    local best_path,best_bytes=nil,0
+    for _,route in ipairs(sources) do
+        if route.key~=current.key then
+            local path=source_part(task_dir,route)
+            local size=U.file_size(path) or 0
+            if size>=RESUME_BYTES and size>best_bytes and (expected<=0 or size<expected) then
+                best_path,best_bytes=path,size
+            end
+        end
+    end
+    return best_path,best_bytes
+end
+
+local function import_resume_partial(task_dir,sources,route,expected)
+    local target=source_part(task_dir,route)
+    if (U.file_size(target) or 0)>0 then return U.file_size(target) or 0 end
+    local source,bytes=best_other_partial(task_dir,sources,route,expected)
+    if not source then return 0 end
+    local ok,err=U.copy_file_stream(source,target,256*1024)
+    if ok then
+        logger.info("[MiuRead][ExtensionDownload] cross-route resume seed copied","source=",route.key,"bytes=",tostring(bytes))
+        return bytes
+    end
+    logger.warn("[MiuRead][ExtensionDownload] cross-route resume seed failed","source=",route.key,"error=",tostring(err or "copy failed"))
+    os.remove(target)
+    return 0
+end
+
 function M.run(store,task_dir,spec)
     spec=type(spec)=="table" and spec or {}
     if not ensure_dir(task_dir) then return {ok=false,error="无法创建扩展下载目录",kind="task_storage"} end
     local package_path=task_dir.."/package.zip"
-    local sources=M.build_sources(spec.url,spec.network,spec.mirrors)
+    local sources=M.build_sources(spec.url,spec.network,spec.mirrors,spec.routes)
     if #sources==0 then return {ok=false,error="没有可用扩展下载源",kind="no_source"} end
     local attempts={}
-    local publish=progress_writer(task_dir,spec,#sources)
     local expected=tonumber(spec.size or 0) or 0
-    local persistent_resume=expected>=LARGE_RESUME_BYTES
+    local persistent_resume=expected>=RESUME_BYTES
+    sources=order_sources(task_dir,sources,spec,expected)
+    local publish=progress_writer(task_dir,spec,#sources)
 
     -- Cache is never trusted. It is revalidated before reuse.
     if U.file_exists(package_path) then
@@ -320,6 +507,7 @@ function M.run(store,task_dir,spec)
         local existing=U.file_size(part) or 0
         if expected>0 and existing>expected then os.remove(part); existing=0 end
         if not persistent_resume and existing>0 then os.remove(part); existing=0 end
+        if persistent_resume and existing==0 then existing=import_resume_partial(task_dir,sources,route,expected) end
 
         -- A previously completed source-local partial may already be valid.
         if existing>0 and (expected<=0 or existing==expected) then
@@ -335,16 +523,17 @@ function M.run(store,task_dir,spec)
             os.remove(part); existing=0
         end
 
-        -- KOReader HTTP is the primary byte-zero transport. A large source-local
-        -- partial is intentionally left for curl to resume; it is never copied to
-        -- another route.
-        if existing==0 then
+        -- KOReader HTTP remains the byte-zero path for small packages. Large
+        -- packages and meaningful partials use curl. A checkpoint may seed a
+        -- later route only for this exact same official asset; the original
+        -- route-local checkpoint is never destroyed by that copy.
+        if existing==0 and not (curl_available and expected>=LARGE_FILE_BYTES) then
             local http=Http:new(store)
             logger.info("[MiuRead][ExtensionDownload] source start","source=",route.key,"transport=koreader_http","index=",tostring(index),"total=",tostring(#sources))
             publish(0,route,"koreader_http",true,"正在尝试 "..route.label,index)
             local called,result=pcall(function()
                 return http:download_to_file(route.url,part,{
-                    auth=false,retries=0,redirects=10,timeout={8,6*60*60},integrity_attempts=1,preserve_partial=true,
+                    auth=false,retries=0,redirects=10,timeout={math.max(8,tonumber(Config.EXTENSION_CONNECT_TIMEOUT_SECONDS) or 20),6*60*60},integrity_attempts=1,preserve_partial=true,
                     on_chunk=function(bytes) publish(bytes,route,"koreader_http",false,"",index) end,
                     heartbeat_seconds=1,heartbeat_bytes=256*1024,
                 })
@@ -468,17 +657,34 @@ function M.run(store,task_dir,spec)
     local partial=0
     for _,route in ipairs(sources) do partial=math.max(partial,U.file_size(source_part(task_dir,route)) or 0) end
     local network_only=#attempts>0
+    local all_unavailable=#attempts>0
+    local transient_seen=false
     for _,attempt in ipairs(attempts) do
         local kind=tostring(attempt.kind or "")
-        if kind~="dns_unavailable" and kind~="network_offline" then network_only=false; break end
+        if kind~="dns_unavailable" and kind~="network_offline" then network_only=false end
+        if kind~="source_unavailable" then all_unavailable=false end
+        if kind=="dns_unavailable" or kind=="network_offline" or kind=="connect_timeout"
+            or kind=="transport_error" or kind=="tls_error" then transient_seen=true end
     end
     if network_only then
         return {ok=false,waiting_network=true,error="当前网络或 DNS 尚未就绪，已保留下载进度",kind="network_unready",attempts=attempts,partial_bytes=partial}
+    end
+    -- A route-local 404, truncated proxy response or bad mirror content must not
+    -- turn another route's temporary timeout into a permanent task failure. If
+    -- at least one real transport failure occurred, park and retry later. Only
+    -- a uniformly unavailable set (all routes 404) or pure content/integrity
+    -- failures are reported as terminal here.
+    if transient_seen and not all_unavailable then
+        return {ok=false,waiting_network=true,error="下载线路暂时不稳定，断点已保留，稍后自动继续",kind="transport_retry",attempts=attempts,partial_bytes=partial}
+    end
+    if all_unavailable then
+        return {ok=false,error="正式安装包在所有下载通道均不可用",kind="source_unavailable",attempts=attempts,partial_bytes=partial}
     end
     return {ok=false,error="所有可用下载源均失败",kind="sources_failed",attempts=attempts,partial_bytes=partial}
 end
 
 M.validate_download=validate_download
-M.LARGE_RESUME_BYTES=LARGE_RESUME_BYTES
+M.LARGE_FILE_BYTES=LARGE_FILE_BYTES
+M.RESUME_BYTES=RESUME_BYTES
 
 return M

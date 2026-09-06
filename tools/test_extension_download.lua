@@ -68,6 +68,10 @@ package.preload['miuread.http']=function()
         local data
         if scenario=='large_isolation' then
             data=string.rep('x',4096)
+        elseif scenario=='mixed_retry' and url:match('^https://github%.com') then
+            data=BAD_SHORT
+        elseif scenario=='mixed_retry' and url:match('^https://m1/') then
+            error('timeout')
         elseif url:match('^https://github%.com') then
             data=scenario=='size' and BAD_SHORT or BAD_SAME
         elseif url:match('^https://m1/') then
@@ -104,8 +108,8 @@ end
 run_case('sha')
 run_case('size')
 
--- Large-file partials stay attached to the exact source. A partial written by
--- GitHub must never appear as the starting bytes of a mirror transport.
+-- Sub-threshold partials stay route-local. beta.15 may seed another route only
+-- after a checkpoint is large enough to be worth a verified Range resume.
 scenario='large_isolation'; calls={}; preexisting_sizes={}
 local large_dir=TMP..'/runtime-large-isolation'; clean(large_dir)
 local large=D.run({},large_dir,{
@@ -118,7 +122,53 @@ for i,n in ipairs(preexisting_sizes) do assert(n==0,'source '..tostring(i)..' in
 assert(file_size(large_dir..'/source-direct.part')==4096,'direct partial should remain source-local')
 assert(file_size(large_dir..'/source-mirror_1.part')==4096,'mirror1 partial should be independent')
 
+-- A meaningful checkpoint may seed a different transport for the exact same
+-- official asset. The original checkpoint must remain intact. curl is disabled
+-- in this portable test, so the copied seed itself is the observable result.
+local seed_dir=TMP..'/runtime-cross-route-seed'; clean(seed_dir)
+local seed=string.rep('p',600*1024)
+write_file(seed_dir..'/source-direct.part',seed)
+local seeded=D.run({},seed_dir,{
+    repo='test/seed',url='https://github.com/test/seed/releases/download/v1/p.zip',
+    size=8*1024*1024,sha256=expected_sha,network={mode='auto'},mirrors={'https://m1/'},
+})
+assert(seeded and seeded.ok==false,'seed-only model should not complete without curl')
+assert(file_size(seed_dir..'/source-direct.part')==#seed,'original checkpoint was destroyed')
+assert(file_size(seed_dir..'/source-mirror_1.part')==#seed,'meaningful checkpoint did not seed the fallback route')
+
+-- A bad/truncated mirror plus another route's temporary timeout is retryable,
+-- not a terminal package-install failure.
+scenario='mixed_retry'; calls={}
+local mixed_dir=TMP..'/runtime-mixed-retry'; clean(mixed_dir)
+-- Reuse the module mock but switch behavior through the shared scenario below.
+local mixed=D.run({},mixed_dir,{
+    repo='test/mixed',url='https://github.com/test/mixed/releases/download/v1/p.zip',
+    size=#GOOD,sha256=expected_sha,network={mode='auto'},mirrors={'https://m1/'},
+})
+assert(mixed and mixed.ok==false and mixed.waiting_network==true,'mixed content/transport failure should preserve task for retry')
+
 -- Manual source selection is fail-closed: an invalid requested mirror does not
 -- silently fall back to GitHub.
 assert(#D.build_sources('https://github.com/a/b/x.zip',{mode='mirror:9'},{'https://m1/'})==0)
 print('extension_download failover + integrity model: PASS')
+
+-- beta.15 route construction: GitHub Chinese community mirror is a transport
+-- for the same official asset, not a different package identity.
+local official='https://github.com/owner/demo.koplugin/releases/download/v2/demo.koplugin.zip'
+local routes={
+    {key='git_zh',label='GitHub 中文社区',mode='replace_host',base='https://mirrors.git-zh.com',preferred=true},
+    {key='direct',label='GitHub 官方',mode='direct'},
+    {key='ghfast',label='ghfast',mode='prefix',base='https://ghfast.top/'},
+}
+local auto=D.build_sources(official,{mode='auto'},nil,routes)
+assert(#auto==3,'beta15 route list size mismatch')
+assert(auto[1].key=='git_zh' and auto[1].url=='https://mirrors.git-zh.com/owner/demo.koplugin/releases/download/v2/demo.koplugin.zip','git-zh route transform incorrect')
+assert(auto[2].key=='direct' and auto[2].url==official,'official route must retain exact asset URL')
+assert(auto[3].key=='ghfast' and auto[3].url=='https://ghfast.top/'..official,'prefix route must retain exact asset identity')
+local direct_only=D.build_sources(official,{mode='direct'},nil,routes)
+assert(#direct_only==1 and direct_only[1].key=='direct','manual direct mode must fail closed to official route')
+local zh_only=D.build_sources(official,{mode='route:git_zh'},nil,routes)
+assert(#zh_only==1 and zh_only[1].key=='git_zh','manual GitHub Chinese route selection incorrect')
+local bad_route=D.build_sources(official,{mode='route:not-there'},nil,routes)
+assert(#bad_route==0,'invalid manual route must fail closed')
+print('extension_download beta15 route identity: PASS')

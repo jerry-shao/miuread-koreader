@@ -655,6 +655,127 @@ function M.package_source(entry, arch)
     }
 end
 
+local function release_asset_sha(value)
+    local sha=tostring(value or ""):lower():match("^sha256:([0-9a-f]+)$")
+        or tostring(value or ""):lower():match("^([0-9a-f]+)$")
+    return sha and #sha==64 and sha or ""
+end
+
+local function release_asset_score(entry,asset,arch)
+    local name=tostring(asset and asset.name or "")
+    local lower=name:lower()
+    if name=="" or tostring(asset.browser_download_url or "")=="" or (tonumber(asset.size) or 0)<=0 then return nil end
+    if not lower:match("%.zip$") then return nil end
+    local source_archive=lower:match("^source%s+code") or lower:match("^source[%._%-]")
+        or lower:match("[%._%-]source[%._%-]") or lower:match("^sources?%.zip$")
+        or lower:match("[%._%-]sources?%.zip$")
+    if lower:find("sha256",1,true) or lower:find("checksum",1,true) or lower:find("symbols",1,true)
+        or lower:find("debug",1,true) or source_archive then return nil end
+    local score=0
+    if lower:find(".koplugin",1,true) then score=score+120 end
+    local repo_name=tostring(entry and entry.repo or ""):match("([^/]+)$") or ""
+    local bare=repo_name:lower():gsub("%.koplugin$","")
+    if bare~="" and lower:find(bare,1,true) then score=score+55 end
+    if tostring(asset.content_type or ""):lower():find("zip",1,true) then score=score+8 end
+    if type(entry and entry.asset_patterns)=="table" and tostring(arch or "")~="" then
+        local patterns=entry.asset_patterns[tostring(arch)]
+        if type(patterns)=="table" and #patterns>0 then
+            local matched=false
+            for _,pattern in ipairs(patterns) do
+                pattern=tostring(pattern or ""):lower()
+                if pattern~="" and lower:find(pattern,1,true) then matched=true; score=score+80; break end
+            end
+            if entry.architecture_sensitive==true and not matched then return nil end
+        end
+    end
+    return score
+end
+
+local function release_source_from_asset(entry,release,asset)
+    local repo=tostring(entry.repo or "")
+    local dirname=tostring(entry.install_dirname or repo:match("([^/]+)$") or "")
+    if not dirname:match("^[%w%._%-]+%.koplugin$") or dirname=="miuread.koplugin" then
+        return nil,"无法从仓库名确定插件安装目录"
+    end
+    local sha=release_asset_sha(asset and asset.digest)
+    local version=tostring(release.tag_name or release.name or "")
+    return {
+        url=tostring(asset and asset.browser_download_url or ""),size=tonumber(asset and asset.size) or 0,sha256=sha,
+        version=version,expected_dir=dirname,asset_name=tostring(asset and asset.name or "package.zip"),
+        source="github-release-asset",channel="release",remote_ref="release:"..version,
+        deterministic=true,layout="release-auto",allow_missing_sha=sha=="",official_release_asset=true,
+    }
+end
+
+-- Return all plausible official Release assets in deterministic score order.
+-- This is intentionally separate from selection so the UI can ask the user if
+-- two equally good artifacts remain instead of silently guessing one.
+function M.release_package_candidates(entry, release, arch)
+    entry=type(entry)=="table" and entry or {}
+    release=type(release)=="table" and release or {}
+    local ranked={}
+    for _,asset in ipairs(type(release.assets)=="table" and release.assets or {}) do
+        local score=release_asset_score(entry,asset,arch)
+        if score then
+            local source=release_source_from_asset(entry,release,asset)
+            if source then ranked[#ranked+1]={source=source,score=score} end
+        end
+    end
+    table.sort(ranked,function(a,b)
+        if a.score~=b.score then return a.score>b.score end
+        return tostring(a.source.asset_name)<tostring(b.source.asset_name)
+    end)
+    local out={}
+    for _,item in ipairs(ranked) do
+        item.source._asset_score=item.score
+        out[#out+1]=item.source
+    end
+    return out
+end
+
+-- beta.15: the official latest Release decides the package identity. Mirrors
+-- only transport those exact bytes. If two top candidates tie, return the
+-- candidate list so the caller can ask the user instead of guessing.
+function M.release_package_source(entry, release, arch)
+    local candidates=M.release_package_candidates(entry,release,arch)
+    if #candidates==0 then return nil,"最新 Release 没有可识别的插件 ZIP",candidates end
+    if #candidates>1 and tonumber(candidates[1]._asset_score)==tonumber(candidates[2]._asset_score) then
+        return nil,"最新 Release 有多个同等候选安装包，需要选择",candidates
+    end
+    local source=candidates[1]
+    source._asset_score=nil
+    return source,nil,candidates
+end
+
+-- Source archives are allowed only after the GitHub Contents API has proved the
+-- repository itself is a complete KOReader plugin (main.lua + _meta.lua at the
+-- root or in one unambiguous *.koplugin directory). This keeps source fallback
+-- generic; no per-plugin source allow-list is needed.
+function M.source_package_source(entry, repo_info, source_probe)
+    entry=type(entry)=="table" and entry or {}
+    repo_info=type(repo_info)=="table" and repo_info or {}
+    source_probe=type(source_probe)=="table" and source_probe or repo_info.source_probe
+    if type(source_probe)~="table" or source_probe.installable~=true then
+        return nil,"GitHub 源码结构尚未确认可直接安装"
+    end
+    local repo=tostring(entry.repo or "")
+    local dirname=tostring(entry.install_dirname or repo:match("([^/]+)$") or "")
+    if not repo:match("^[%w%._%-]+/[%w%._%-]+$") then return nil,"源码仓库地址无效" end
+    if not dirname:match("^[%w%._%-]+%.koplugin$") or dirname=="miuread.koplugin" then
+        return nil,"源码安装目录无效"
+    end
+    local branch=tostring(source_probe.branch or repo_info.default_branch or "main")
+    if branch=="" or branch:find("[^%w%._%-%/]") then return nil,"源码分支无效" end
+    local url="https://github.com/"..repo.."/archive/refs/heads/"..branch..".zip"
+    return {
+        url=url,size=0,sha256="",version="source:"..branch,expected_dir=dirname,
+        asset_name=(repo:match("([^/]+)$") or "plugin").."-"..branch:gsub("/","-")..".zip",
+        source="github-source-verified",channel="source",remote_ref="source:"..branch,
+        deterministic=true,layout=tostring(source_probe.path or "source-root"),allow_missing_sha=true,
+        verified_source=true,source_probe_path=tostring(source_probe.path or ""),
+    }
+end
+
 function M.has_installable_package(entry, arch)
     return M.package_source(entry,arch)~=nil
 end

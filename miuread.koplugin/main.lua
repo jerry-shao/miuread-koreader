@@ -135,10 +135,10 @@ local HOME_SECTION_ORDER={"shelf","device","recent"}
 -- fully configurable.
 -- Frontlight is no longer a homepage shortcut candidate. It lives only in the
 -- pull-down direct-control section (and the reader controls).
-local HOME_ACTION_ITEM_ORDER={"refresh","search","downloads","sync","mp","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
-local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=true,downloads=true,sync=true,mp=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
-local HOME_ACTION_LAYOUT_VERSION=5
-local HOME_ACTION_MAX_VISIBLE=7
+local HOME_ACTION_ITEM_ORDER={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"}
+local HOME_ACTION_ITEM_DEFAULT={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false}
+local HOME_ACTION_LAYOUT_VERSION=6
+local HOME_ACTION_MAX_VISIBLE=6
 -- Keep the full pull-down control-center candidate pool, but render at most
 -- eight supported/selected controls in one compact row. The display limit is
 -- intentionally separate from the candidate-pool size so new controls do not
@@ -3255,6 +3255,7 @@ function Plugin:_home_preferences()
         if table.concat(normalized,"|")~=table.concat(home[order_key],"|") then changed=true end
         home[order_key]=normalized
     end
+    if home.action_items.mp~=nil then home.action_items.mp=nil; changed=true end
     normalize_quick_group("action_items","action_order","action_layout_version",HOME_ACTION_LAYOUT_VERSION,HOME_ACTION_ITEM_ORDER,HOME_ACTION_ITEM_DEFAULT)
     if home.action_items.frontlight~=nil then home.action_items.frontlight=nil; changed=true end
     normalize_quick_group("panel_items","panel_order","panel_layout_version",HOME_PANEL_LAYOUT_VERSION,HOME_PANEL_ITEM_ORDER,HOME_PANEL_ITEM_DEFAULT)
@@ -5605,7 +5606,7 @@ end
 -- selection belongs to the local filter popup instead of persistent tabs.
 
 local HOME_ACTION_LABELS={
-    refresh="刷新",search="搜索",downloads="下载",sync="同步",mp="公众号",sleep="休眠",
+    refresh="刷新",search="搜索",downloads="下载",sync="同步",sleep="休眠",
     miuread_settings="觅阅设置",all_books="全部书籍",history="阅读历史",file_manager="文件管理",screenshot="截图",
     extensions="插件与扩展",
 }
@@ -9569,7 +9570,6 @@ function Plugin:_home_action_entries()
             -- submission happened when this click is only verifying or waiting.
             self:_sync_home_pending()
         end},
-        mp={icon="▤",icon_key="newspaper",label="公众号",callback=function() self:show_mp_shelf(false) end},
         miuread_settings={icon="⚙",icon_key="settings",label="设置",callback=function() self:_show_home_settings_center() end},
         all_books={icon="▦",label="全部书籍",callback=function() self:show_home_all_books() end},
         history={icon="◷",label="阅读历史",callback=function() self:show_home_reading_history() end},
@@ -11841,6 +11841,73 @@ function Plugin:_home_full_refresh(confirmed)
     -- Compatibility fallback for KOReader builds where the active UI listener
     -- is temporarily unavailable during a desktop transition.
     UIManager:broadcastEvent(Event:new("FullRefresh"))
+    return true
+end
+
+-- beta.15: cloud writes briefly own the network lane. Book/plugin downloads
+-- keep their checkpoints but yield before final progress, annotations or other
+-- critical reading data is written. Nested writers share one ownership record.
+function Plugin:_critical_transfer_begin(reason)
+    reason=tostring(reason or "cloud_write")
+    local state=self._critical_transfer_priority
+    if type(state)~="table" then
+        state={depth=0,book_owned=false,extension_owned=false,reasons={}}
+        self._critical_transfer_priority=state
+    end
+    state.depth=(tonumber(state.depth) or 0)+1
+    state.reasons[reason]=(tonumber(state.reasons[reason]) or 0)+1
+    if state.depth>1 then return true end
+    if self.download_task and self.download_task:busy() then
+        local ok=pcall(self.download_task.pause,self.download_task,"cloud_sync_priority")
+        if ok then state.book_owned=true end
+    end
+    if self.extension_task and type(self.extension_task.running)=="function" and self.extension_task:running() then
+        local ok=pcall(self.extension_task.pause,self.extension_task,"sync_priority")
+        if ok then state.extension_owned=true end
+    end
+    logger.info("[MiuRead][NetworkPriority] cloud write owns lane",
+        "reason=",reason,"book=",tostring(state.book_owned),
+        "extension=",tostring(state.extension_owned))
+    return true
+end
+
+function Plugin:_critical_transfer_ready()
+    local state=self._critical_transfer_priority
+    if type(state)~="table" or (tonumber(state.depth) or 0)<=0 then return true end
+    if state.book_owned and self.download_task and self.download_task:busy() then
+        local paused=false
+        if type(self.download_task.worker_pause_acknowledged)=="function" then
+            local ok,value=pcall(self.download_task.worker_pause_acknowledged,self.download_task)
+            paused=ok and value==true
+        end
+        if type(self.download_task.is_hibernated)=="function" and self.download_task:is_hibernated() then paused=true end
+        if not paused then return false end
+    end
+    if state.extension_owned and self.extension_task and type(self.extension_task.running)=="function"
+        and self.extension_task:running() then return false end
+    return true
+end
+
+function Plugin:_critical_transfer_end(reason)
+    reason=tostring(reason or "cloud_write_complete")
+    local state=self._critical_transfer_priority
+    if type(state)~="table" or (tonumber(state.depth) or 0)<=0 then return false end
+    state.depth=math.max(0,(tonumber(state.depth) or 0)-1)
+    if state.depth>0 then return true end
+    local book_owned=state.book_owned==true
+    local extension_owned=state.extension_owned==true
+    state.book_owned=false; state.extension_owned=false; state.reasons={}
+    if book_owned and self.download_task then
+        pcall(self.download_task.resume,self.download_task,"cloud_sync_priority")
+    end
+    if extension_owned and self.extension_task then
+        local snapshot=type(self.extension_task.snapshot)=="function" and self.extension_task:snapshot() or nil
+        if type(snapshot)=="table" and tostring(snapshot.state or "")=="paused_priority" then
+            pcall(self.extension_task.resume,self.extension_task,"sync_priority")
+        end
+    end
+    logger.info("[MiuRead][NetworkPriority] cloud write released lane",
+        "reason=",reason,"book=",tostring(book_owned),"extension=",tostring(extension_owned))
     return true
 end
 
@@ -20470,9 +20537,11 @@ function Plugin:_sync_annotations_before_book_delete(book_id,on_done)
     end
     local prefs=U.copy(self:_annotation_sync_preferences())
     local service=self.annotation_sync
+    local priority_started=self:_critical_transfer_begin("annotation_delete")~=false
     local started,err=self.annotation_async:run("annotation-sync-before-delete",function()
         return service:sync_book(U.copy(book),U.copy(record),{preferences=prefs,limit=200})
     end,function(worker_result)
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_delete") end
         if not worker_result or worker_result.ok~=true then
             on_done(false,worker_result and worker_result.error or "批注同步后台任务失败")
             return
@@ -20484,7 +20553,10 @@ function Plugin:_sync_annotations_before_book_delete(book_id,on_done)
             +(tonumber(latest.delete_pending or 0) or 0)+(tonumber(latest.action_required or 0) or 0)) or 0
         if remains>0 then on_done(false,"仍有 "..tostring(remains).." 条批注需要处理") else on_done(true) end
     end)
-    if not started then on_done(false,tostring(err or "无法开始批注同步")) end
+    if not started then
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_delete") end
+        on_done(false,tostring(err or "无法开始批注同步"))
+    end
     return started
 end
 
@@ -22255,6 +22327,7 @@ function Plugin:_sync_all_pending_annotations(on_done)
     if #jobs==0 then if on_done then on_done(true,{synced=0,deleted=0,failed=0}) end; return true end
     local prefs=U.copy(self:_annotation_sync_preferences())
     local service=self.annotation_sync
+    local priority_started=self:_critical_transfer_begin("annotation_sync_all")~=false
     local started,err=self.annotation_async:run("annotation-sync-all",function()
         local total={ok=true,synced=0,deleted=0,failed=0,locate_failed=0,metadata_failed=0,coord_failed=0,unknown=0,books=0}
         for _,job in ipairs(jobs) do
@@ -22273,6 +22346,7 @@ function Plugin:_sync_all_pending_annotations(on_done)
         end
         return total
     end,function(worker_result)
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_sync_all") end
         if not worker_result or worker_result.ok~=true then
             if on_done then on_done(false,{error=worker_result and worker_result.error or "后台任务失败"}) end
             return
@@ -22280,7 +22354,11 @@ function Plugin:_sync_all_pending_annotations(on_done)
         local result=worker_result.value or {}
         if on_done then on_done(result.ok~=false,result) end
     end,220)
-    if not started then if on_done then on_done(false,{error=err or "后台任务不可用"}) end; return false end
+    if not started then
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_sync_all") end
+        if on_done then on_done(false,{error=err or "后台任务不可用"}) end
+        return false
+    end
     return true
 end
 
@@ -27056,6 +27134,10 @@ function Plugin:_reading_end_sync(reason,options,callback)
         +(tonumber(annotation_summary.delete_pending or 0) or 0)
     local need_annotations=close_annotations and (annotation_retryable>0 or annotation_summary_err~=nil)
     local authenticated=self:logged_in()
+    local transfer_priority_started=false
+    if authenticated and type(self._critical_transfer_begin)=="function" then
+        transfer_priority_started=self:_critical_transfer_begin("reading_end")~=false
+    end
 
     -- One durable control write hands the final time segment to the long-lived
     -- service. The service owns the clock and computes `now-last_report_at`.
@@ -27073,6 +27155,10 @@ function Plugin:_reading_end_sync(reason,options,callback)
     local function mark_critical_done(ok,stage)
         if critical_done then return false end
         critical_done=true
+        if transfer_priority_started then
+            transfer_priority_started=false
+            pcall(self._critical_transfer_end,self,"reading_end")
+        end
         if options.defer_resume_until_critical==true then self._reading_end_finalizer_active=false end
         logger.info("[MiuRead][ReadingEnd] critical background handoff complete",
             "reason=",reason,"ok=",tostring(ok==true),"stage=",tostring(stage or "done"),
@@ -27154,14 +27240,20 @@ function Plugin:_reading_end_sync(reason,options,callback)
             logger.info("[MiuRead][ReadingEnd] annotation background deferred","book=",book_id)
             return false
         end
-        return self.annotation_async:run("annotation-reading-end-background",function()
+        local annotation_priority=self:_critical_transfer_begin("annotation_reading_end")~=false
+        local annotation_started=self.annotation_async:run("annotation-reading-end-background",function()
             return service:sync_book(book,record,{preferences=prefs,limit=200,diagnostic_only=false})
         end,function(worker_result)
+            if annotation_priority then annotation_priority=false; pcall(self._critical_transfer_end,self,"annotation_reading_end") end
             local value=worker_result and worker_result.value or nil
             local ok=worker_result and worker_result.ok==true and type(value)=="table" and value.ok~=false
             logger.info("[MiuRead][ReadingEnd] annotation background finished","book=",book_id,"ok=",tostring(ok==true))
             refresh_home_sync_state()
         end,25)==true
+        if not annotation_started and annotation_priority then
+            annotation_priority=false; pcall(self._critical_transfer_end,self,"annotation_reading_end")
+        end
+        return annotation_started
     end
     start_annotation_background()
 
@@ -27496,9 +27588,11 @@ function Plugin:sync_local_annotations_now(force_diagnostic)
     local record=U.copy(current.record or {})
     local service=self.annotation_sync
     self:toast(diagnostic_only and "正在生成批注坐标诊断…" or "正在同步本地批注…",2)
+    local priority_started=not diagnostic_only and self:_critical_transfer_begin("annotation_manual")~=false or false
     local started,err=self.annotation_async:run("annotation-sync",function()
         return service:sync_book(book,record,{preferences=prefs,limit=200,diagnostic_only=diagnostic_only})
     end,function(worker_result)
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_manual") end
         if not worker_result or worker_result.ok~=true then
             self:info("本地批注同步失败："..tostring(worker_result and worker_result.error or "后台任务失败"))
             return
@@ -27559,7 +27653,10 @@ function Plugin:sync_local_annotations_now(force_diagnostic)
         end
         self:info(table.concat(lines,"\n"))
     end,180)
-    if not started then self:info("无法启动本地批注同步："..tostring(err or "后台任务不可用")); return false end
+    if not started then
+        if priority_started then priority_started=false; pcall(self._critical_transfer_end,self,"annotation_manual") end
+        self:info("无法启动本地批注同步："..tostring(err or "后台任务不可用")); return false
+    end
     return true
 end
 
