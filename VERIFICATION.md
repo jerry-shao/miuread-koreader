@@ -1,22 +1,22 @@
-# 5.8.0-beta.20 verification
+# 5.8.0-beta.21 verification
 
 ## 完成标准
 
-- Issue #105：旧状态 `shelf_filter.enabled=true` 且未选择任何分组时必须显示完整微信书架。
-- 权威分组快照确认原选择已经不存在时，自动恢复全部书籍并给出一次恢复提示。
-- 一个真实存在、明确选中的空分组仍允许显示 0 本；真正微信书架为 0 本时也必须保持 0 本。
-- 分组响应不完整时保留现有有效缓存，不把“不知道有没有分组”误判成“没有分组”。
-- Schema 135 能从已有 `raw_books > 0 / books = 0` 缓存离线恢复书架。
-- 取消最后一个分组或“清空选择”后立即回到全部微信书架。
-- 只有新鲜、权威的分组响应明确 `groups=0` 且 `raw_books>=100` 时才产生建立分组建议。
-- 100 本提醒不改变书架内容；99 本不提醒；已有任意微信分组时不提醒。
-- 提醒按账号独立；“知道了”结束当前无分组阶段，“不再提醒”永久关闭该账号提醒；提示只在主页空闲且没有其他模态界面时出现。
-- 日志记录 raw/groups/selected/mode/effective/reason。
-- beta.19 的阅读时长、精确进度、SAFE pending、sources 清理、主页按需加载、后台下载、休眠与退出收尾全部保持。
+- PR #72 在线评论点赞完整保留：`review_single` 查询官方状态，`like_review` 执行点赞/取消点赞；默认关闭，仅在“划线与评论”中由用户主动开启。
+- `store.lua` 只能存在一份有效 `preferences` 默认表，必须保留 beta.20 的 `shelf_group_hint`、主页/锁屏布局版本，并在该表的 `thoughts` 中包含 `online_likes=false`。
+- 已确认的点赞内存状态同时保存 `is_liked` 与最新 `likesCount`；关闭后重开弹窗要同时恢复爱心和数量，缓存签名必须包含两者。
+- 服务器 `succ=false` 不得当作成功；服务器返回 `likesCount` 时必须优先使用，接口未返回时才允许临时按 +/-1 显示。
+- 点赞不进入批注 pending queue/离线队列，不新增本地点赞数据库；写请求保持 `retries=0`、`rate_limit_retries=0` 的无盲重试策略。
+- 同一评论请求中禁止重复点击；旧 pooled popup 会话返回值不得更新重新打开的弹窗；账号/登录会话变化不得串用点赞状态。
+- 确认 `-2011/-2012` 登录失效后按 `auth_revision` 熔断，重新登录导致 revision 变化后可自然恢复。
+- 在线点赞关闭时，评论弹窗打开/关闭必须保持 beta.20 的 `partial` waveform；开启后才使用 `ui` waveform，点赞成功继续优先局部刷新赞区域。
+- Schema 保持 135，不为默认关闭的可选布尔项增加迁移。
+- beta.20 的 Issue #105 分组恢复、100 本无分组提醒，以及 beta.19 的阅读时长、精确进度、SAFE pending、sources 清理、主页按需加载、后台下载、休眠与退出收尾全部保持。
 
 ## 自动验证
 
-- `python3 tools/verify_beta20.py`
+- `python3 tools/verify_beta21.py`
+- `texlua tools/test_online_comment_likes.lua`
 - `texlua tools/test_shelf_group_recovery.lua`
 - `texlua tools/test_readtime_recovery.lua`
 - `texlua tools/test_store_repair.lua`
@@ -26,4 +26,4 @@
 - `texlua tools/test_extension_install.lua`
 - `texlua tools/test_digest_stream.lua`
 
-Release ZIP 必须只有一个 `miuread.koplugin/` 根目录，插件版本必须为 `5.8.0-beta.20`，Schema 必须为 135。
+Release ZIP 必须只有一个 `miuread.koplugin/` 根目录，插件版本必须为 `5.8.0-beta.21`，Schema 必须为 135。

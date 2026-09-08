@@ -1,17 +1,17 @@
 {
-  "version": "5.8.0-beta.20",
-  "name": "觅阅 · 微信读书助手 5.8.0-beta.20 内测版",
+  "version": "5.8.0-beta.21",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.21 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.20/miuread-v5.8.0-beta.20-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.20/miuread-v5.8.0-beta.20-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.20/miuread-v5.8.0-beta.20-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.20/miuread-v5.8.0-beta.20-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.20/miuread-v5.8.0-beta.20-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip"
   ],
-  "size": 1968285,
-  "sha256": "18e6ccfc4568a0c046ffb3cccb0aae442498ffed45aa7a4b316f12500263903f",
-  "summary": "修复 #105 微信书架分组筛选导致 0 本书的问题；空选择/失效分组自动恢复完整书架，并在无分组且书架达到 100 本时提供一次非强制分组建议。",
-  "notes": "Schema 升至 135：旧版 enabled=true 但没有有效分组选择时自动回到全部微信书架，并可从 raw_books 缓存离线恢复；已失效分组在权威快照确认后也回退全部并提示一次。明确存在的空分组和真实空书架仍允许显示 0 本；分组响应不完整继续保留有效缓存。无任何微信分组且原始书架达到 100 本时，按账号提醒用户建立分组，“知道了”结束当前无分组阶段，“不再提醒”永久关闭；提醒不限制、不隐藏任何书。beta.19 的阅读时间、精确进度、SAFE pending、sources 防膨胀、主页按需加载和后台同步保持不变。"
+  "size": 1960511,
+  "sha256": "952cd47646545e62ea32f7e1c9a52cf4aa6f204862ba15777983432a635f6e4b",
+  "summary": "新增划线评论在线点赞/取消点赞，修复 PR 合并配置冲突和点赞状态缓存，同时保持 beta20 书架与 beta19 同步性能优化。",
+  "notes": "合入 PR #72 在线评论点赞：默认关闭，可在“划线与评论”中开启；首次未知状态先读取微信读书官方状态，点赞/取消点赞以 succ 与 likesCount 为准，不进入批注离线队列，也不盲目重试。清理合并时重复的 preferences 默认表，并在真正生效的 beta20 配置中加入 online_likes=false；点赞内存状态同时保存 is_liked 与 likesCount，重开弹窗不会出现爱心和数字不一致。在线点赞关闭时恢复 beta20 原 partial 刷新，开启后才使用交互式 ui waveform。Schema 保持 135；Issue #105、100 本无分组提醒、阅读时长热路径、SAFE pending、精确进度与后台稳定性全部保留。"
 }

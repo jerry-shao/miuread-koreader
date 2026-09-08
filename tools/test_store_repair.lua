@@ -54,7 +54,7 @@ package.preload['luasettings']=function()
 end
 package.preload['dump']=function() return function(v) return dump_table(v) end end
 package.preload['miuread.config']=function()
-    return {SCHEMA=135,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.20',
+    return {SCHEMA=135,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.21',
         UPDATE_MANIFEST='',AUTO_UPDATE_INTERVAL=1,READ_INTERVAL=60,IDLE_TIMEOUT=60,REMOTE_THRESHOLD=3}
 end
 package.preload['miuread.json']=function() return {encode=function() return '{}' end,decode=function() return {} end} end
@@ -122,6 +122,8 @@ SEED={
 
 local Store=require('miuread.store')
 local st=Store:new{isolated=true,data_dir=TMP..'/data',settings_path=TMP..'/settings.lua'}
+local prefs=st:preferences()
+assert(type(prefs.thoughts)=='table' and prefs.thoughts.online_likes==false,'beta21 online likes default is not safely disabled')
 local row=assert(st:session('book1'))
 assert(row.chapters==nil,'top-level duplicate chapter catalog survived migration')
 assert(type(row.legacy_report_context)=='table' and row.legacy_report_context.chapters==nil,'legacy context chapters survived migration')
