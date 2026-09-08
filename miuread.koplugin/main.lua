@@ -2128,7 +2128,11 @@ function Plugin:_refresh_shelf_async(on_ready,silent,request_options)
             "cache_retained=",tostring(kept_cache==true),"elapsed_ms=",tostring(refresh_elapsed_ms()))
         local stats=kept_cache~=true and self.library.last_shelf_filter or nil
         if stats and stats.kept==0 and stats.filtered>0 then
-            self:toast("所选分组没有找到书籍，已跳过 "..tostring(stats.filtered).." 本。\n可在“微信分组”中重新选择。",5)
+            self:toast("所选分组当前没有书籍，已跳过 "..tostring(stats.filtered).." 本。\n可在“微信分组”中重新选择。",5)
+        end
+        if kept_cache~=true then
+            self:_consume_shelf_filter_recovery_notice()
+            self:_handle_large_shelf_group_hint_refresh()
         end
         if on_ready then on_ready(books,mp,nil,{cache_retained=kept_cache==true}) end
     end
@@ -7663,6 +7667,17 @@ function Plugin:_show_home_library_source_picker(section,anchor)
 end
 
 
+local function shelf_filter_has_selection(filter)
+    filter=type(filter)=="table" and filter or {}
+    for _,selected in pairs(type(filter.archive_keys)=="table" and filter.archive_keys or {}) do
+        if selected==true then return true end
+    end
+    for _,selected in pairs(type(filter.archives)=="table" and filter.archives or {}) do
+        if selected==true then return true end
+    end
+    return false
+end
+
 local function home_group_selected(filter,group)
     filter=type(filter)=="table" and filter or {}
     group=type(group)=="table" and group or {}
@@ -7676,8 +7691,9 @@ function Plugin:_home_allowed_weread_groups()
     local prefs=self:_shelf_filter_prefs()
     local filter=prefs.shelf_filter
     local out={}
+    local selected_mode=filter.enabled==true and shelf_filter_has_selection(filter)
     for _,group in ipairs(type(snapshot.list)=="table" and snapshot.list or {}) do
-        if filter.enabled~=true or home_group_selected(filter,group) then out[#out+1]=group end
+        if not selected_mode or home_group_selected(filter,group) then out[#out+1]=group end
     end
     table.sort(out,function(a,b) return tostring(a.name or "")<tostring(b.name or "") end)
     return out,snapshot
@@ -7788,8 +7804,9 @@ function Plugin:_home_unified_sections(account_rows,generated_rows,local_rows,mp
     local recent=UnifiedLibrary.apply(data.recent,{source="all",kind="all",locality="all",sort="recent"},"recent")
     local shelf_empty="书架里还没有内容"
     local shelf_filter=self:_shelf_filter_prefs().shelf_filter
-    if tostring(shelf_state.source or "all")=="weread" and shelf_filter.enabled==true and #self:_home_allowed_weread_groups()==0 then
-        shelf_empty="原选择的微信分组已不存在，请重新选择分组"
+    if tostring(shelf_state.source or "all")=="weread" and shelf_filter.enabled==true
+        and shelf_filter_has_selection(shelf_filter) and #self:_home_allowed_weread_groups()==0 then
+        shelf_empty="正在校准微信分组；现有有效书架会继续保留"
     end
     return {
         shelf={title="书架",rows=shelf,count=#(data.shelf or {}),empty=shelf_empty},
@@ -17015,6 +17032,12 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
     -- A precise end-of-reading snapshot is self-contained. Once Home is
     -- interactive it may confirm/replay that snapshot without reopening EPUB.
     self:_schedule_home_progress_recovery(2.4)
+    UIManager:scheduleIn(1.1,function()
+        if HomeView.is_shown() and not self:_active_reader_ui() then
+            self:_consume_shelf_filter_recovery_notice()
+            self:_resume_large_shelf_group_hint()
+        end
+    end)
     return true
 end
 
@@ -24412,6 +24435,157 @@ function Plugin:home_lockscreen_settings_menu()
     return rows
 end
 
+local LARGE_SHELF_GROUP_HINT_THRESHOLD=100
+
+function Plugin:_shelf_group_hint_account_key()
+    if not self:logged_in() then return "" end
+    local key=DownloadDatabase.account_key(self.store)
+    if tostring(key or "")=="anonymous" then return "" end
+    return tostring(key or "")
+end
+
+function Plugin:_shelf_group_hint_state()
+    local prefs=self.store:preferences()
+    prefs.shelf_group_hint=type(prefs.shelf_group_hint)=="table" and prefs.shelf_group_hint or {accounts={}}
+    prefs.shelf_group_hint.accounts=type(prefs.shelf_group_hint.accounts)=="table" and prefs.shelf_group_hint.accounts or {}
+    local key=self:_shelf_group_hint_account_key()
+    local state=key~="" and type(prefs.shelf_group_hint.accounts[key])=="table" and prefs.shelf_group_hint.accounts[key] or {}
+    return prefs,state,key
+end
+
+function Plugin:_save_shelf_group_hint_state(mutator)
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" then return false end
+    state=U.copy(state)
+    if type(mutator)=="function" then mutator(state) end
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    return true
+end
+
+function Plugin:_reset_large_shelf_hint_episode_if_grouped(meta)
+    meta=type(meta)=="table" and meta or {}
+    if meta.group_response_authoritative~=true or (tonumber(meta.groups) or 0)<=0 then return false end
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" or state.dismissed==true then return false end
+    if state.acknowledged~=true and tonumber(state.last_shown_count or 0)==0 then return false end
+    state=U.copy(state)
+    state.acknowledged=false
+    state.last_shown_count=0
+    state.last_shown_at=0
+    state.grouped_at=os.time()
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    logger.info("[MiuRead][ShelfHint] episode reset","reason=groups_present","groups=",tostring(meta.groups))
+    return true
+end
+
+function Plugin:_show_large_shelf_group_hint(candidate,generation,attempt)
+    if generation~=(tonumber(self._large_shelf_group_hint_generation) or 0) then return false end
+    candidate=type(candidate)=="table" and candidate or {}
+    local count=tonumber(candidate.books) or 0
+    if count<LARGE_SHELF_GROUP_HINT_THRESHOLD or tonumber(candidate.groups or 0)~=0
+        or candidate.authoritative~=true then return false end
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" or state.dismissed==true or state.acknowledged==true then return false end
+    if not HomeView.is_shown() or self:_active_reader_ui() then
+        self._large_shelf_group_hint_candidate=U.copy(candidate)
+        return false
+    end
+    if self:_home_ui_busy() or self:_home_modal_surface_active() then
+        attempt=(tonumber(attempt) or 0)+1
+        if attempt<=8 then
+            UIManager:scheduleIn(1.3,function()
+                self:_show_large_shelf_group_hint(candidate,generation,attempt)
+            end)
+        end
+        return false
+    end
+
+    -- Mark the current no-group episode as acknowledged before showing. Closing
+    -- the dialog with Back therefore still counts as one delivered reminder.
+    state=U.copy(state)
+    state.acknowledged=true
+    state.last_shown_count=count
+    state.last_shown_at=os.time()
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    self._large_shelf_group_hint_candidate=nil
+
+    local dialog
+    dialog=ButtonDialog:new{
+        title="微信书架已有 "..tostring(count).." 本书\n\n书籍较多时，建立分组可以减少一次性展示和刷新压力，也更方便查找。\n\n建议在微信读书中建立分组。",
+        title_align="center",
+        buttons={
+            {{text="知道了",callback=function() UIManager:close(dialog) end}},
+            {{text="不再提醒",callback=function()
+                UIManager:close(dialog)
+                self:_save_shelf_group_hint_state(function(current)
+                    current.acknowledged=true
+                    current.dismissed=true
+                    current.dismissed_at=os.time()
+                    current.last_shown_count=count
+                end)
+                logger.info("[MiuRead][ShelfHint] disabled","books=",tostring(count))
+            end}},
+        },
+    }
+    logger.info("[MiuRead][ShelfHint]","type=group_recommendation","books=",tostring(count),"groups=0","shown=true")
+    UIManager:show(dialog)
+    return true
+end
+
+function Plugin:_handle_large_shelf_group_hint_refresh()
+    if not (self.library and self.library.last_refresh_meta and self.library.large_shelf_group_hint) then return false end
+    local meta=self.library:last_refresh_meta()
+    if meta.group_response_authoritative~=true then return false end
+    self:_reset_large_shelf_hint_episode_if_grouped(meta)
+    local candidate=self.library:large_shelf_group_hint(LARGE_SHELF_GROUP_HINT_THRESHOLD)
+    self._large_shelf_group_hint_generation=(tonumber(self._large_shelf_group_hint_generation) or 0)+1
+    local generation=self._large_shelf_group_hint_generation
+    if not candidate then
+        self._large_shelf_group_hint_candidate=nil
+        logger.info("[MiuRead][ShelfHint]","books=",tostring(meta.raw_books or 0),"groups=",tostring(meta.groups or 0),"shown=false")
+        return false
+    end
+    self._large_shelf_group_hint_candidate=U.copy(candidate)
+    UIManager:scheduleIn(1.2,function()
+        self:_show_large_shelf_group_hint(candidate,generation,0)
+    end)
+    return true
+end
+
+function Plugin:_resume_large_shelf_group_hint()
+    local candidate=self._large_shelf_group_hint_candidate
+    if type(candidate)~="table" then return false end
+    local generation=tonumber(self._large_shelf_group_hint_generation) or 0
+    UIManager:scheduleIn(1.0,function()
+        self:_show_large_shelf_group_hint(candidate,generation,0)
+    end)
+    return true
+end
+
+function Plugin:_consume_shelf_filter_recovery_notice()
+    local runtime=self.library and self.library.take_shelf_filter_recovery and self.library:take_shelf_filter_recovery() or nil
+    local prefs=self:_shelf_filter_prefs()
+    local pending=tostring(prefs.shelf_filter.recovery_notice_pending or "")
+    local kind=type(runtime)=="table" and tostring(runtime.kind or "") or pending
+    if pending~="" then
+        prefs.shelf_filter.recovery_notice_pending=nil
+        self.store:save_preferences(prefs)
+    end
+    if kind=="" then return false end
+    if kind=="stale_selection_recovered" or kind=="stale_selection" then
+        self:toast("原先选择的微信分组已不存在，已恢复显示全部书籍。",4)
+    elseif kind=="empty_selection_recovered" or kind=="empty_selection" then
+        self:toast("已修复旧版空分组筛选状态，微信书架已恢复显示全部书籍。",4)
+    elseif kind=="invalid_zero_recovered" then
+        self:toast("检测到异常空书架结果，已恢复显示完整微信书架。",4)
+    end
+    logger.info("[MiuRead][ShelfFilter] recovery notice","reason=",kind)
+    return true
+end
+
 function Plugin:_shelf_filter_prefs()
     local p=self.store:preferences()
     p.shelf_filter=type(p.shelf_filter)=="table" and p.shelf_filter or {enabled=false,archives={},archive_keys={}}
@@ -24422,10 +24596,10 @@ end
 
 function Plugin:_shelf_filter_label()
     local filter=self:_shelf_filter_prefs().shelf_filter
-    if filter.enabled~=true then return "全部微信书架" end
+    if filter.enabled~=true or not shelf_filter_has_selection(filter) then return "全部微信书架" end
     local count=0
     for _,group in ipairs(self:_home_allowed_weread_groups()) do if home_group_selected(filter,group) then count=count+1 end end
-    if count==0 then return "指定分组 · 未选择" end
+    if count==0 then return "全部微信书架" end
     return "指定分组 · "..tostring(count).." 个"
 end
 
@@ -24459,15 +24633,15 @@ function Plugin:shelf_filter_settings_menu()
     end
 
     local rows={
-        {text="全部微信书架",radio=true,checked_func=function() return view.enabled~=true end,keep_menu_open=true,callback=function()
+        {text="全部微信书架",radio=true,checked_func=function() return view.enabled~=true or not shelf_filter_has_selection(view) end,keep_menu_open=true,callback=function()
             write(function(f) f.enabled=false end)
         end},
-        {text="指定分组",post_text="只允许选中的分组进入觅阅",radio=true,checked_func=function() return view.enabled==true end,keep_menu_open=true,callback=function()
+        {text="指定分组",post_text="至少选择一个分组后生效",radio=true,checked_func=function() return view.enabled==true and shelf_filter_has_selection(view) end,keep_menu_open=true,callback=function()
             write(function(f) f.enabled=true end)
         end},
     }
     if #groups==0 then
-        rows[#rows+1]={text="暂无可用分组",post_text="刷新微信书架后更新",enabled=false}
+        rows[#rows+1]={text="暂无可用分组",post_text="没有分组时显示全部微信书架",enabled=false}
     else
         for _,group in ipairs(groups) do
             local item=group
@@ -24486,9 +24660,11 @@ function Plugin:shelf_filter_settings_menu()
                         if selected then
                             if name~="" then f.archives[name]=nil end
                             if key~="" then f.archive_keys[key]=nil end
+                            if not shelf_filter_has_selection(f) then f.enabled=false end
                         else
                             if name~="" then f.archives[name]=true end
                             if key~="" then f.archive_keys[key]=true end
+                            f.enabled=true
                         end
                     end)
                 end,
@@ -24506,12 +24682,9 @@ function Plugin:shelf_filter_settings_menu()
                 end
             end)
         end}
-        rows[#rows+1]={text="清空",post_text="保持指定分组模式，但暂不允许任何分组",keep_menu_open=true,callback=function()
-            write(function(f) f.enabled=true; f.archives={}; f.archive_keys={} end)
+        rows[#rows+1]={text="清空选择",post_text="清空后恢复全部微信书架",keep_menu_open=true,callback=function()
+            write(function(f) f.enabled=false; f.archives={}; f.archive_keys={} end)
         end}
-    end
-    if view.enabled==true and #self:_home_allowed_weread_groups()==0 then
-        rows[#rows+1]={text="当前没有已允许的有效分组",post_text="主页会保持空状态，不会回退到完整书架",enabled=false}
     end
     rows[#rows+1]={text="刷新微信书架与分组",post_text="从微信服务器重新校准",callback=function()
         self:toast("正在刷新微信书架与分组…",2)

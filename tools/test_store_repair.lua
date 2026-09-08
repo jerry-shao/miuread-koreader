@@ -54,7 +54,7 @@ package.preload['luasettings']=function()
 end
 package.preload['dump']=function() return function(v) return dump_table(v) end end
 package.preload['miuread.config']=function()
-    return {SCHEMA=134,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.19',
+    return {SCHEMA=135,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.20',
         UPDATE_MANIFEST='',AUTO_UPDATE_INTERVAL=1,READ_INTERVAL=60,IDLE_TIMEOUT=60,REMOTE_THRESHOLD=3}
 end
 package.preload['miuread.json']=function() return {encode=function() return '{}' end,decode=function() return {} end} end
@@ -97,6 +97,12 @@ for i=1,320 do chapters[i]={uid='u'..i,index=i,title='chapter '..i,word_count=20
 local deep={leaf=true}; for i=1,260 do deep={next=deep} end
 SEED={
     schema=130,
+    preferences={shelf_filter={enabled=true,archives={},archive_keys={}}},
+    shelf_cache={
+        raw_books={{bookId='w1',title='one'},{bookId='w2',title='two'}},raw_mp={},books={},mp={},
+        groups={authoritative=true,list={},book_groups={}},
+        effective_scope={mode='selected',fingerprint='selected||',updated_at=1},updated_at=1,
+    },
     library={
         book1={book_id='book1',catalog=copy(chapters),catalog_complete=true,variants={}},
         book2={book_id='book2',catalog={{uid='a',index=1,word_count=1000},{uid='b',index=2,word_count=2000}},catalog_complete=false,
@@ -142,6 +148,12 @@ assert(b2.variants.clean.read_report_enabled==true,'schema132 did not re-enable 
 local s2=assert(st:session('book2'))
 assert(s2.progress_upload_state=='submitted','legacy unconfirmed progress was not normalized to submitted')
 assert((tonumber(s2.pending_report_seconds) or 0)==0 and s2.pending_report_safe==false,'legacy uncertain reading-time debt was replayable after migration')
+local prefs=st:preferences()
+assert(prefs.shelf_filter.enabled==false,'schema135 did not disable empty selected-group state')
+assert(tostring(prefs.shelf_filter.recovery_notice_pending or '')=='empty_selection','schema135 recovery notice was not recorded')
+local shelf=st:shelf_cache()
+assert(#shelf.raw_books==2 and #shelf.books==2,'schema135 did not restore raw shelf books offline')
+assert(type(prefs.shelf_group_hint)=='table' and type(prefs.shelf_group_hint.accounts)=='table','schema135 did not initialize account-scoped group hint state')
 local loader,err=loadfile(TMP..'/settings.lua'); assert(loader,err)
 local ok,data=pcall(loader); assert(ok and type(data)=='table','compacted settings file is not valid Lua')
-print('store compaction + schema134 progress-source migration: PASS')
+print('store compaction + schema134/135 shelf recovery migration: PASS')

@@ -225,19 +225,50 @@ local function table_keys_sorted(t)
     return out
 end
 
+local function filter_selection_count(filter)
+    filter=type(filter)=="table" and filter or {}
+    local seen,count={},0
+    for key,value in pairs(type(filter.archive_keys)=="table" and filter.archive_keys or {}) do
+        key=tostring(key or "")
+        if value==true and key~="" and not seen["k:"..key] then seen["k:"..key]=true; count=count+1 end
+    end
+    for name,value in pairs(type(filter.archives)=="table" and filter.archives or {}) do
+        name=tostring(name or "")
+        if value==true and name~="" and not seen["n:"..name] then seen["n:"..name]=true; count=count+1 end
+    end
+    return count
+end
+
 local function current_filter(store)
     local prefs=store and store.preferences and store:preferences() or {}
     local filter=type(prefs.shelf_filter)=="table" and prefs.shelf_filter or {}
+    local archives=type(filter.archives)=="table" and filter.archives or {}
+    local archive_keys=type(filter.archive_keys)=="table" and filter.archive_keys or {}
+    local requested=filter.enabled==true
+    local selected=filter_selection_count{archives=archives,archive_keys=archive_keys}
+    -- beta.20 compatibility rule: selected-group mode is active only when at
+    -- least one group is actually selected. An empty selection always means
+    -- the complete WeRead shelf, matching the pre-5.7 behavior and preventing
+    -- stale upgrade state from turning a valid shelf into zero books.
     return {
-        enabled=filter.enabled==true,
-        archives=type(filter.archives)=="table" and filter.archives or {},
-        archive_keys=type(filter.archive_keys)=="table" and filter.archive_keys or {},
+        enabled=requested and selected>0,
+        requested_enabled=requested,
+        selected_count=selected,
+        archives=archives,
+        archive_keys=archive_keys,
     },prefs
 end
 
 local function filter_fingerprint(filter)
     if filter.enabled~=true then return "all" end
     return "selected|"..table.concat(table_keys_sorted(filter.archive_keys),",").."|"..table.concat(table_keys_sorted(filter.archives),",")
+end
+
+local function preference_filter_fingerprint(filter)
+    filter=type(filter)=="table" and filter or {}
+    return (filter.requested_enabled==true and "on|" or "off|")
+        ..table.concat(table_keys_sorted(filter.archive_keys),",").."|"
+        ..table.concat(table_keys_sorted(filter.archives),",")
 end
 
 local function row_group_names(row)
@@ -270,6 +301,18 @@ local function apply_filter(filter,rows)
         if row_allowed(filter,row) then out[#out+1]=U.copy(row) else filtered=filtered+1 end
     end
     return out,filtered
+end
+
+local function valid_selected_group_count(filter,groups)
+    if filter.enabled~=true then return 0 end
+    local count=0
+    for _,group in ipairs(type(groups)=="table" and type(groups.list)=="table" and groups.list or {}) do
+        local key,name=tostring(group.key or ""),tostring(group.name or "")
+        if (key~="" and filter.archive_keys[key]==true) or (name~="" and filter.archives[name]==true) then
+            count=count+1
+        end
+    end
+    return count
 end
 
 local function group_member_sets(groups)
@@ -324,10 +367,14 @@ function Library:_reconcile_group_preferences(groups)
         by_key[tostring(group.key or "")]=group
     end
     local new_names,new_keys={},{}
-    if filter.enabled==true then
+    local new_enabled=filter.requested_enabled==true
+    local had_selection=filter.selected_count>0
+    if filter.requested_enabled==true and had_selection then
         -- Stable keys survive a rename directly. Name-only groups are migrated
         -- only when one disappeared selected group has exactly one highly
-        -- overlapping new candidate; ambiguous cases remain fail-closed.
+        -- overlapping new candidate; ambiguous cases do not select a random
+        -- group. If nothing valid survives, beta.20 safely restores the full
+        -- shelf instead of keeping an empty selected-group state.
         for key,value in pairs(filter.archive_keys) do
             if value==true and by_key[tostring(key)] then
                 local group=by_key[tostring(key)]
@@ -387,16 +434,44 @@ function Library:_reconcile_group_preferences(groups)
                 end
             end
         end
+        if filter_selection_count{archives=new_names,archive_keys=new_keys}==0 then
+            new_enabled=false
+            self.last_shelf_filter_recovery={kind="stale_selection_recovered",at=os.time()}
+        end
+    elseif filter.requested_enabled==true then
+        -- 5.7/5.8 could persist enabled=true with no selected group. In beta.20
+        -- this old state is normalized back to the complete WeRead shelf.
+        new_enabled=false
+        self.last_shelf_filter_recovery={kind="empty_selection_recovered",at=os.time()}
+    else
+        -- Full-shelf mode may remember old selections so switching back can
+        -- restore them; they are inactive while enabled=false.
+        new_names=U.copy(filter.archives)
+        new_keys=U.copy(filter.archive_keys)
     end
-    local changed=filter_fingerprint(filter)~=filter_fingerprint{enabled=filter.enabled,archives=new_names,archive_keys=new_keys}
+
+    local before=preference_filter_fingerprint(filter)
+    local after=preference_filter_fingerprint{
+        requested_enabled=new_enabled,archives=new_names,archive_keys=new_keys,
+    }
+    local changed=before~=after
     if changed then
+        prefs.shelf_filter.enabled=new_enabled
         prefs.shelf_filter.archives=new_names
         prefs.shelf_filter.archive_keys=new_keys
         self.store:save_preferences(prefs)
         logger.info("[MiuRead][ShelfGroups] selection reconciled",
-            "enabled=",tostring(filter.enabled==true),"groups=",tostring(#table_keys_sorted(new_names)))
+            "enabled=",tostring(new_enabled==true),
+            "selected=",tostring(filter_selection_count{archives=new_names,archive_keys=new_keys}),
+            "recovered_all=",tostring(new_enabled~=true and filter.requested_enabled==true))
     end
     return changed
+end
+
+function Library:take_shelf_filter_recovery()
+    local value=self.last_shelf_filter_recovery
+    self.last_shelf_filter_recovery=nil
+    return value
 end
 
 function Library:_normalize_full(data)
@@ -494,20 +569,31 @@ function Library:_apply_stream_response(data)
     -- cache and wait for the next full refresh instead.
     if stream and (stream.keep_cache==true or stream.enabled==true) then
         local books,mp=self:cached()
+        self.last_shelf_refresh_meta={
+            raw_books=#books,effective_books=#books,groups=0,selected=0,
+            group_response_authoritative=false,cache_retained=true,reason="partial_response",
+        }
         logger.info("[MiuRead][ShelfStream] partial response ignored",
             "reason=",tostring(stream.reason or "local_navigation_policy"),
             "books=",tostring(#books),"mp=",tostring(#mp))
         return books,mp,false,true
     end
     local raw_books,mp,groups=self:_normalize_full(data)
+    local response_group_authoritative=groups.authoritative==true
     local filter=current_filter(self.store)
-    if groups.authoritative~=true then
+    if not response_group_authoritative then
         local previous_cache=self.store:shelf_cache()
         local previous_groups=type(previous_cache.groups)=="table" and previous_cache.groups or nil
         if filter.enabled==true then
             -- A successful book response without archive metadata is not a
             -- successful group refresh. Keep the last valid scoped snapshot.
             local books,cached_mp=self:cached()
+            self.last_shelf_refresh_meta={
+                raw_books=#raw_books,effective_books=#books,
+                groups=type(previous_groups)=="table" and #(type(previous_groups.list)=="table" and previous_groups.list or {}) or 0,
+                selected=filter.selected_count or 0,group_response_authoritative=false,
+                cache_retained=true,reason="group_response_incomplete",
+            }
             logger.warn("[MiuRead][ShelfGroups] incomplete group response retained cache",
                 "books=",tostring(#books),"mp=",tostring(#cached_mp))
             return books,cached_mp,false,true
@@ -523,16 +609,59 @@ function Library:_apply_stream_response(data)
     self:_reconcile_group_preferences(groups)
     filter=current_filter(self.store)
     local books,filtered=apply_filter(filter,raw_books)
+    local valid_selected=valid_selected_group_count(filter,groups)
+    local reason="all"
+    if filter.enabled==true then
+        reason="selected_groups"
+    elseif filter.requested_enabled==true and filter.selected_count==0 then
+        reason="empty_selection_all"
+    elseif self.last_shelf_filter_recovery then
+        reason=tostring(self.last_shelf_filter_recovery.kind or "recovered_all")
+    elseif response_group_authoritative and #(type(groups.list)=="table" and groups.list or {})==0 then
+        reason="no_groups"
+    end
+    -- Defensive invariant: without an effective selected-group filter, a
+    -- non-empty authoritative/raw shelf may never collapse to zero locally.
+    if #raw_books>0 and filter.enabled~=true and #books==0 then
+        books=U.copy(raw_books); filtered=0; reason="invalid_zero_recovered"
+        self.last_shelf_filter_recovery={kind="invalid_zero_recovered",at=os.time()}
+    end
     self.last_shelf_filter=filter.enabled==true and {kept=#books,filtered=filtered} or nil
+    self.last_shelf_refresh_meta={
+        raw_books=#raw_books,effective_books=#books,
+        groups=#(type(groups.list)=="table" and groups.list or {}),
+        selected=valid_selected,group_response_authoritative=response_group_authoritative,
+        cache_retained=false,reason=reason,
+    }
     self.store:save_shelf_cache({
         raw_books=raw_books,raw_mp=U.copy(mp),books=books,mp=mp,groups=groups,updated_at=os.time(),
         effective_scope={mode=filter.enabled and "selected" or "all",fingerprint=filter_fingerprint(filter),updated_at=os.time()},
         stream={enabled=false,ids={},hydrated_ids={},total=#raw_books+#mp,source="full",updated_at=os.time()},
     })
+    logger.info("[MiuRead][ShelfFilter] snapshot",
+        "raw=",tostring(#raw_books),"groups=",tostring(#(type(groups.list)=="table" and groups.list or {})),
+        "selected=",tostring(valid_selected),"mode=",filter.enabled and "selected" or "all",
+        "effective=",tostring(#books),"reason=",reason,
+        "group_authoritative=",tostring(response_group_authoritative))
     logger.info("[MiuRead][ShelfGroups] full snapshot saved",
         "raw=",tostring(#raw_books),"effective=",tostring(#books),"groups=",tostring(#(groups.list or {})),
-        "authoritative=",tostring(groups.authoritative==true))
+        "authoritative=",tostring(groups.authoritative==true),
+        "response_authoritative=",tostring(response_group_authoritative))
     return books,mp,false,false
+end
+
+function Library:last_refresh_meta()
+    return U.copy(type(self.last_shelf_refresh_meta)=="table" and self.last_shelf_refresh_meta or {})
+end
+
+function Library:large_shelf_group_hint(threshold)
+    threshold=math.max(1,tonumber(threshold) or 100)
+    local meta=type(self.last_shelf_refresh_meta)=="table" and self.last_shelf_refresh_meta or {}
+    if meta.group_response_authoritative~=true or meta.cache_retained==true then return nil end
+    if (tonumber(meta.groups) or 0)~=0 then return nil end
+    local count=tonumber(meta.raw_books) or 0
+    if count<threshold then return nil end
+    return {books=count,groups=0,authoritative=true,reason="large_ungrouped_shelf"}
 end
 
 function Library:merge_stream_batch(data,requested_ids)
