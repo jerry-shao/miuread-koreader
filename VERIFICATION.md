@@ -1,64 +1,29 @@
-# 5.8.0-beta.18 verification
+# 5.8.0-beta.21 verification
 
-Scope: make extension versions follow the actual newest installable stable GitHub Release, allow structurally verified community extensions to install without a MiuRead allow-list, preserve the beta.15 download/integrity model, and move 公众号 out of the middle Home shortcut strip into the pull-down control center.
+## 完成标准
 
-## Extension version authority
+- PR #72 在线评论点赞完整保留：`review_single` 查询官方状态，`like_review` 执行点赞/取消点赞；默认关闭，仅在“划线与评论”中由用户主动开启。
+- `store.lua` 只能存在一份有效 `preferences` 默认表，必须保留 beta.20 的 `shelf_group_hint`、主页/锁屏布局版本，并在该表的 `thoughts` 中包含 `online_likes=false`。
+- 已确认的点赞内存状态同时保存 `is_liked` 与最新 `likesCount`；关闭后重开弹窗要同时恢复爱心和数量，缓存签名必须包含两者。
+- 服务器 `succ=false` 不得当作成功；服务器返回 `likesCount` 时必须优先使用，接口未返回时才允许临时按 +/-1 显示。
+- 点赞不进入批注 pending queue/离线队列，不新增本地点赞数据库；写请求保持 `retries=0`、`rate_limit_retries=0` 的无盲重试策略。
+- 同一评论请求中禁止重复点击；旧 pooled popup 会话返回值不得更新重新打开的弹窗；账号/登录会话变化不得串用点赞状态。
+- 确认 `-2011/-2012` 登录失效后按 `auth_revision` 熔断，重新登录导致 revision 变化后可自然恢复。
+- 在线点赞关闭时，评论弹窗打开/关闭必须保持 beta.20 的 `partial` waveform；开启后才使用 `ui` waveform，点赞成功继续优先局部刷新赞区域。
+- Schema 保持 135，不为默认关闭的可选布尔项增加迁移。
+- beta.20 的 Issue #105 分组恢复、100 本无分组提醒，以及 beta.19 的阅读时长、精确进度、SAFE pending、sources 清理、主页按需加载、后台下载、休眠与退出收尾全部保持。
 
-- “觅阅推荐” is trust/compatibility metadata, not a frozen latest-version registry.
-- The center reads up to 20 recent GitHub Releases and selects the first stable release that exposes a plausible plugin ZIP.
-- Drafts and prereleases are ignored. A `stable-channel`/manifest release with no plugin ZIP is skipped.
-- A newest installable Release with tied top assets is not guessed; the user is asked to choose.
-- InkStain canonical repo is `Estela-Zelin84/inkstain.koplugin`; `miumiupy98-art/inkstain.koplugin` remains a historical alias so existing records migrate without uninstall/reinstall.
-- Curated entries retain a verified fallback package, but runtime “latest” and update checks are GitHub-driven.
+## 自动验证
 
-## Community installation
-
-- A repository does not need to be in the MiuRead catalog to be installable.
-- Official Release assets must identify one safe `.koplugin` target; architecture-labelled foreign assets are filtered before download and the existing post-extraction platform/ELF checks still run.
-- If no usable stable Release exists, source installation is considered only after GitHub Contents proves `main.lua + _meta.lua` at the repo root (with a safe `.koplugin` repo name) or inside one unambiguous `.koplugin` directory.
-- Multiple source plugin directories, missing markers, unsafe install dir names, and ambiguous Release assets remain fail-closed.
-- GitHub/API/network failure is never reinterpreted as “there is no Release”, so it cannot silently trigger source fallback.
-
-## Integrity / transport
-
-- Existing beta.15 route selection, large-file probes, resumable partials, cloud-write priority and transaction install remain unchanged.
-- Mirrors transport the exact already-selected official GitHub asset; they do not choose versions/packages.
-- Official size and digest are checked when GitHub exposes them.
-- For historical official assets without a digest, MiuRead computes and records a local SHA-256 when the device can do so; archive traversal, plugin structure and compatibility checks remain mandatory.
-- GitHub metadata cache TTL is 30 minutes to avoid repeated requests while still following new releases promptly.
-
-## Home 公众号 placement
-
-- Middle Home shortcut defaults remain exactly: 刷新 / 搜索 / 下载 / 同步 / 休眠 / 设置.
-- `mp` is removed from legacy `action_items` during preference normalization.
-- 公众号 is now a pull-down control-center candidate and opens `show_mp_shelf(false)`.
-- An untouched beta.16 default control-center layout replaces Screenshot with 公众号 so the default stays within eight slots; Screenshot remains available through customization.
-- Customized layouts are preserved and only gain 公众号 as an optional candidate.
-
-## Regression boundary
-
-beta.17 keeps schema **132** and ReadReport **v28**. It does not replace beta.16 shared Store behavior, beta.13 exact progress mapping, beta.14 public-account shelf/article navigation, beta.15 download transport/cloud-write priority, OTA core, or KOReader Reader/CRE/input internals.
-
-## Automated verification
-
-Run:
-
-- `python tools/verify_beta17.py`
+- `python3 tools/verify_beta21.py`
+- `texlua tools/test_online_comment_likes.lua`
+- `texlua tools/test_shelf_group_recovery.lua`
+- `texlua tools/test_readtime_recovery.lua`
+- `texlua tools/test_store_repair.lua`
+- `texlua tools/test_store_shared.lua`
 - `texlua tools/test_extension_catalog.lua`
 - `texlua tools/test_extension_download.lua`
 - `texlua tools/test_extension_install.lua`
-- `texlua tools/test_store_repair.lua`
-- `texlua tools/test_store_shared.lua`
 - `texlua tools/test_digest_stream.lua`
 
-The final Release ZIP must contain a single `miuread.koplugin/` root and its version must match `5.8.0-beta.18`.
-
-## beta.18 lockscreen / device-beauty acceptance
-
-- `设备美化` contains Appearance / InkStain / DashWallpaper / CoverProgress / Highlights Screensaver; DashWallpaper is featured.
-- Only InkStain and DashWallpaper are direct external lockscreen providers in beta.18.
-- Native cover / InkStain / DashWallpaper switches preserve a native rollback snapshot and never commit Dash before a valid PNG exists.
-- Lock-screen-triggered extension install records a pending provider, resumes after restart, and clears the pending intent on every install failure path.
-- Missing external provider falls back to the last native cover style. Android/no-suspend devices are not force-integrated.
-- The Home middle quick strip still excludes 公众号; 公众号 remains in the pull-down panel.
-- `python3 tools/verify_beta18.py` must pass before packaging.
+Release ZIP 必须只有一个 `miuread.koplugin/` 根目录，插件版本必须为 `5.8.0-beta.21`，Schema 必须为 135。

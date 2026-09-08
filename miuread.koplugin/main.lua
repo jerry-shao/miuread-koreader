@@ -67,10 +67,35 @@ local SuspendWorkLease=require("miuread.suspend_work_lease")
 local PseudoLockscreen=require("miuread.pseudo_lockscreen")
 local Library=require("miuread.library")
 local ShelfView=require("miuread.shelf_view")
-local FullShelfView=require("miuread.full_shelf_view")
-local HomeView=require("miuread.home_view")
-local LocalBrowserView=require("miuread.local_browser_view")
-local HomeQuickPanel=require("miuread.home_quick_panel")
+-- Desktop-only UI modules are intentionally lazy. Reader mode should not parse
+-- or retain the full Home/shelf/browser/panel stack until one of those modules
+-- is actually used. The proxy preserves every existing `Module.method(...)`
+-- call site, and Lua's require cache makes the first real load permanent.
+-- Keep the helper on _G: main.lua is already close to LuaJIT's top-level local
+-- limit, so this avoids adding another local while retaining the same 4 module
+-- locals that beta.18 already had.
+function _G._miu_desktop_lazy(name,cold)
+    local module
+    return setmetatable({}, { __index = function(_, key)
+        -- Reuse a module loaded by the other MiuRead foreground instance, but
+        -- keep cheap "is it open?" probes cold when nobody has loaded it yet.
+        module=module or package.loaded[name]
+        if module~=nil then return module[key] end
+        if type(cold)=="table" and cold[key]~=nil then return cold[key] end
+        module=require(name)
+        return module[key]
+    end })
+end
+local FullShelfView=_G._miu_desktop_lazy("miuread.full_shelf_view")
+local HomeView=_G._miu_desktop_lazy("miuread.home_view",{
+    is_shown=function() return false end,current=function() return nil end,
+    prune_duplicates=function() return false end,close=function() return false end,
+    suspend=function() return false end,
+})
+local LocalBrowserView=_G._miu_desktop_lazy("miuread.local_browser_view")
+local HomeQuickPanel=_G._miu_desktop_lazy("miuread.home_quick_panel",{
+    close=function() return false end,refreshFrontlight=function() return false end,
+})
 local ActionSheet=require("miuread.action_sheet")
 local TransientGuard=require("miuread.transient_guard")
 local ScreenshotMode=require("miuread.screenshot_mode")
@@ -1469,10 +1494,10 @@ function Plugin:_auth_health()
     return U.merge({state="unknown",last_checked_at=0,last_ok_at=0,last_error_at=0,
         last_error_code="",last_error_message="",last_error_channel="",notice_pending=false,channels={}},auth.health or {})
 end
-function Plugin:_save_auth_health(health)
+function Plugin:_save_auth_health(health,deferred)
     local auth=self.store:auth()
     auth.health=health
-    self.store:save_auth(auth)
+    self.store:save_auth(auth,{deferred=deferred==true})
     return health
 end
 function Plugin:_recompute_auth_health(health)
@@ -1487,11 +1512,17 @@ function Plugin:_recompute_auth_health(health)
     health.state=partial and "partial" or (unknown and "unknown" or "ok")
     return health
 end
-function Plugin:_mark_auth_channel_ok(channel)
+function Plugin:_mark_auth_channel_ok(channel,deferred)
     if not self:logged_in() then return end
     local now=os.time()
     local health=self:_auth_health()
     health.channels=health.channels or {}
+    local previous=auth_row(health.channels[channel])
+    -- A repeated read_report "ok" only advances health timestamps and may stay
+    -- deferred. The first success, or recovery from an error/expired state, is
+    -- still persisted immediately so a crash cannot resurrect a stale auth
+    -- warning after the channel has actually recovered.
+    local health_only_repeat=deferred==true and tostring(previous.state or "") == "ok"
     health.channels[channel]={state="ok",checked_at=now,error="",code="",failures=0,retry_at=0,last_ok_at=now}
     health.last_checked_at=now
     health.last_ok_at=now
@@ -1503,7 +1534,7 @@ function Plugin:_mark_auth_channel_ok(channel)
         health.last_error_channel=""
         health.notice_pending=false
     end
-    self:_save_auth_health(health)
+    self:_save_auth_health(health,health_only_repeat)
 end
 function Plugin:_mark_auth_channel_error(channel,err,retry_at)
     if not self:logged_in() then return end
@@ -2097,7 +2128,11 @@ function Plugin:_refresh_shelf_async(on_ready,silent,request_options)
             "cache_retained=",tostring(kept_cache==true),"elapsed_ms=",tostring(refresh_elapsed_ms()))
         local stats=kept_cache~=true and self.library.last_shelf_filter or nil
         if stats and stats.kept==0 and stats.filtered>0 then
-            self:toast("所选分组没有找到书籍，已跳过 "..tostring(stats.filtered).." 本。\n可在“微信分组”中重新选择。",5)
+            self:toast("所选分组当前没有书籍，已跳过 "..tostring(stats.filtered).." 本。\n可在“微信分组”中重新选择。",5)
+        end
+        if kept_cache~=true then
+            self:_consume_shelf_filter_recovery_notice()
+            self:_handle_large_shelf_group_hint_refresh()
         end
         if on_ready then on_ready(books,mp,nil,{cache_retained=kept_cache==true}) end
     end
@@ -7632,6 +7667,17 @@ function Plugin:_show_home_library_source_picker(section,anchor)
 end
 
 
+local function shelf_filter_has_selection(filter)
+    filter=type(filter)=="table" and filter or {}
+    for _,selected in pairs(type(filter.archive_keys)=="table" and filter.archive_keys or {}) do
+        if selected==true then return true end
+    end
+    for _,selected in pairs(type(filter.archives)=="table" and filter.archives or {}) do
+        if selected==true then return true end
+    end
+    return false
+end
+
 local function home_group_selected(filter,group)
     filter=type(filter)=="table" and filter or {}
     group=type(group)=="table" and group or {}
@@ -7645,8 +7691,9 @@ function Plugin:_home_allowed_weread_groups()
     local prefs=self:_shelf_filter_prefs()
     local filter=prefs.shelf_filter
     local out={}
+    local selected_mode=filter.enabled==true and shelf_filter_has_selection(filter)
     for _,group in ipairs(type(snapshot.list)=="table" and snapshot.list or {}) do
-        if filter.enabled~=true or home_group_selected(filter,group) then out[#out+1]=group end
+        if not selected_mode or home_group_selected(filter,group) then out[#out+1]=group end
     end
     table.sort(out,function(a,b) return tostring(a.name or "")<tostring(b.name or "") end)
     return out,snapshot
@@ -7757,8 +7804,9 @@ function Plugin:_home_unified_sections(account_rows,generated_rows,local_rows,mp
     local recent=UnifiedLibrary.apply(data.recent,{source="all",kind="all",locality="all",sort="recent"},"recent")
     local shelf_empty="书架里还没有内容"
     local shelf_filter=self:_shelf_filter_prefs().shelf_filter
-    if tostring(shelf_state.source or "all")=="weread" and shelf_filter.enabled==true and #self:_home_allowed_weread_groups()==0 then
-        shelf_empty="原选择的微信分组已不存在，请重新选择分组"
+    if tostring(shelf_state.source or "all")=="weread" and shelf_filter.enabled==true
+        and shelf_filter_has_selection(shelf_filter) and #self:_home_allowed_weread_groups()==0 then
+        shelf_empty="正在校准微信分组；现有有效书架会继续保留"
     end
     return {
         shelf={title="书架",rows=shelf,count=#(data.shelf or {}),empty=shelf_empty},
@@ -13173,6 +13221,17 @@ function Plugin:_thoughts_enabled()
     return (self.store:preferences().thoughts or {}).enabled~=false
 end
 
+function Plugin:_online_comment_likes_enabled()
+    return (self.store:preferences().thoughts or {}).online_likes==true
+end
+
+function Plugin:_toggle_online_comment_likes()
+    local p=self.store:preferences(); p.thoughts=p.thoughts or {}
+    p.thoughts.online_likes=p.thoughts.online_likes~=true
+    self:_save_ui_preferences(p,"online_comment_likes")
+    return true
+end
+
 function Plugin:_set_thoughts_enabled(enabled)
     enabled=enabled~=false
     local p=self.store:preferences(); p.thoughts=p.thoughts or {}
@@ -16984,6 +17043,12 @@ function Plugin:_show_miuread_home_now(force_scan,from_refresh,quiet,refresh_kin
     -- A precise end-of-reading snapshot is self-contained. Once Home is
     -- interactive it may confirm/replay that snapshot without reopening EPUB.
     self:_schedule_home_progress_recovery(2.4)
+    UIManager:scheduleIn(1.1,function()
+        if HomeView.is_shown() and not self:_active_reader_ui() then
+            self:_consume_shelf_filter_recovery_notice()
+            self:_resume_large_shelf_group_hint()
+        end
+    end)
     return true
 end
 
@@ -23824,7 +23889,11 @@ function Plugin:on_auth_required(channel,err)
     return marked
 end
 function Plugin:on_auth_channel_ok(channel)
-    self:_mark_auth_channel_ok(channel)
+    -- The read-report channel confirms every normal 60 s interval. Persisting
+    -- its health timestamp by rewriting the whole settings file would recreate
+    -- the very periodic stall beta.19 removes. Other channels keep their
+    -- existing immediate persistence because they are user/transaction driven.
+    self:_mark_auth_channel_ok(channel,tostring(channel or "")=="read_report")
 end
 
 function Plugin:on_read_report_ready()
@@ -24377,6 +24446,157 @@ function Plugin:home_lockscreen_settings_menu()
     return rows
 end
 
+local LARGE_SHELF_GROUP_HINT_THRESHOLD=100
+
+function Plugin:_shelf_group_hint_account_key()
+    if not self:logged_in() then return "" end
+    local key=DownloadDatabase.account_key(self.store)
+    if tostring(key or "")=="anonymous" then return "" end
+    return tostring(key or "")
+end
+
+function Plugin:_shelf_group_hint_state()
+    local prefs=self.store:preferences()
+    prefs.shelf_group_hint=type(prefs.shelf_group_hint)=="table" and prefs.shelf_group_hint or {accounts={}}
+    prefs.shelf_group_hint.accounts=type(prefs.shelf_group_hint.accounts)=="table" and prefs.shelf_group_hint.accounts or {}
+    local key=self:_shelf_group_hint_account_key()
+    local state=key~="" and type(prefs.shelf_group_hint.accounts[key])=="table" and prefs.shelf_group_hint.accounts[key] or {}
+    return prefs,state,key
+end
+
+function Plugin:_save_shelf_group_hint_state(mutator)
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" then return false end
+    state=U.copy(state)
+    if type(mutator)=="function" then mutator(state) end
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    return true
+end
+
+function Plugin:_reset_large_shelf_hint_episode_if_grouped(meta)
+    meta=type(meta)=="table" and meta or {}
+    if meta.group_response_authoritative~=true or (tonumber(meta.groups) or 0)<=0 then return false end
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" or state.dismissed==true then return false end
+    if state.acknowledged~=true and tonumber(state.last_shown_count or 0)==0 then return false end
+    state=U.copy(state)
+    state.acknowledged=false
+    state.last_shown_count=0
+    state.last_shown_at=0
+    state.grouped_at=os.time()
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    logger.info("[MiuRead][ShelfHint] episode reset","reason=groups_present","groups=",tostring(meta.groups))
+    return true
+end
+
+function Plugin:_show_large_shelf_group_hint(candidate,generation,attempt)
+    if generation~=(tonumber(self._large_shelf_group_hint_generation) or 0) then return false end
+    candidate=type(candidate)=="table" and candidate or {}
+    local count=tonumber(candidate.books) or 0
+    if count<LARGE_SHELF_GROUP_HINT_THRESHOLD or tonumber(candidate.groups or 0)~=0
+        or candidate.authoritative~=true then return false end
+    local prefs,state,key=self:_shelf_group_hint_state()
+    if key=="" or state.dismissed==true or state.acknowledged==true then return false end
+    if not HomeView.is_shown() or self:_active_reader_ui() then
+        self._large_shelf_group_hint_candidate=U.copy(candidate)
+        return false
+    end
+    if self:_home_ui_busy() or self:_home_modal_surface_active() then
+        attempt=(tonumber(attempt) or 0)+1
+        if attempt<=8 then
+            UIManager:scheduleIn(1.3,function()
+                self:_show_large_shelf_group_hint(candidate,generation,attempt)
+            end)
+        end
+        return false
+    end
+
+    -- Mark the current no-group episode as acknowledged before showing. Closing
+    -- the dialog with Back therefore still counts as one delivered reminder.
+    state=U.copy(state)
+    state.acknowledged=true
+    state.last_shown_count=count
+    state.last_shown_at=os.time()
+    prefs.shelf_group_hint.accounts[key]=state
+    self.store:save_preferences(prefs)
+    self._large_shelf_group_hint_candidate=nil
+
+    local dialog
+    dialog=ButtonDialog:new{
+        title="微信书架已有 "..tostring(count).." 本书\n\n书籍较多时，建立分组可以减少一次性展示和刷新压力，也更方便查找。\n\n建议在微信读书中建立分组。",
+        title_align="center",
+        buttons={
+            {{text="知道了",callback=function() UIManager:close(dialog) end}},
+            {{text="不再提醒",callback=function()
+                UIManager:close(dialog)
+                self:_save_shelf_group_hint_state(function(current)
+                    current.acknowledged=true
+                    current.dismissed=true
+                    current.dismissed_at=os.time()
+                    current.last_shown_count=count
+                end)
+                logger.info("[MiuRead][ShelfHint] disabled","books=",tostring(count))
+            end}},
+        },
+    }
+    logger.info("[MiuRead][ShelfHint]","type=group_recommendation","books=",tostring(count),"groups=0","shown=true")
+    UIManager:show(dialog)
+    return true
+end
+
+function Plugin:_handle_large_shelf_group_hint_refresh()
+    if not (self.library and self.library.last_refresh_meta and self.library.large_shelf_group_hint) then return false end
+    local meta=self.library:last_refresh_meta()
+    if meta.group_response_authoritative~=true then return false end
+    self:_reset_large_shelf_hint_episode_if_grouped(meta)
+    local candidate=self.library:large_shelf_group_hint(LARGE_SHELF_GROUP_HINT_THRESHOLD)
+    self._large_shelf_group_hint_generation=(tonumber(self._large_shelf_group_hint_generation) or 0)+1
+    local generation=self._large_shelf_group_hint_generation
+    if not candidate then
+        self._large_shelf_group_hint_candidate=nil
+        logger.info("[MiuRead][ShelfHint]","books=",tostring(meta.raw_books or 0),"groups=",tostring(meta.groups or 0),"shown=false")
+        return false
+    end
+    self._large_shelf_group_hint_candidate=U.copy(candidate)
+    UIManager:scheduleIn(1.2,function()
+        self:_show_large_shelf_group_hint(candidate,generation,0)
+    end)
+    return true
+end
+
+function Plugin:_resume_large_shelf_group_hint()
+    local candidate=self._large_shelf_group_hint_candidate
+    if type(candidate)~="table" then return false end
+    local generation=tonumber(self._large_shelf_group_hint_generation) or 0
+    UIManager:scheduleIn(1.0,function()
+        self:_show_large_shelf_group_hint(candidate,generation,0)
+    end)
+    return true
+end
+
+function Plugin:_consume_shelf_filter_recovery_notice()
+    local runtime=self.library and self.library.take_shelf_filter_recovery and self.library:take_shelf_filter_recovery() or nil
+    local prefs=self:_shelf_filter_prefs()
+    local pending=tostring(prefs.shelf_filter.recovery_notice_pending or "")
+    local kind=type(runtime)=="table" and tostring(runtime.kind or "") or pending
+    if pending~="" then
+        prefs.shelf_filter.recovery_notice_pending=nil
+        self.store:save_preferences(prefs)
+    end
+    if kind=="" then return false end
+    if kind=="stale_selection_recovered" or kind=="stale_selection" then
+        self:toast("原先选择的微信分组已不存在，已恢复显示全部书籍。",4)
+    elseif kind=="empty_selection_recovered" or kind=="empty_selection" then
+        self:toast("已修复旧版空分组筛选状态，微信书架已恢复显示全部书籍。",4)
+    elseif kind=="invalid_zero_recovered" then
+        self:toast("检测到异常空书架结果，已恢复显示完整微信书架。",4)
+    end
+    logger.info("[MiuRead][ShelfFilter] recovery notice","reason=",kind)
+    return true
+end
+
 function Plugin:_shelf_filter_prefs()
     local p=self.store:preferences()
     p.shelf_filter=type(p.shelf_filter)=="table" and p.shelf_filter or {enabled=false,archives={},archive_keys={}}
@@ -24387,10 +24607,10 @@ end
 
 function Plugin:_shelf_filter_label()
     local filter=self:_shelf_filter_prefs().shelf_filter
-    if filter.enabled~=true then return "全部微信书架" end
+    if filter.enabled~=true or not shelf_filter_has_selection(filter) then return "全部微信书架" end
     local count=0
     for _,group in ipairs(self:_home_allowed_weread_groups()) do if home_group_selected(filter,group) then count=count+1 end end
-    if count==0 then return "指定分组 · 未选择" end
+    if count==0 then return "全部微信书架" end
     return "指定分组 · "..tostring(count).." 个"
 end
 
@@ -24424,15 +24644,15 @@ function Plugin:shelf_filter_settings_menu()
     end
 
     local rows={
-        {text="全部微信书架",radio=true,checked_func=function() return view.enabled~=true end,keep_menu_open=true,callback=function()
+        {text="全部微信书架",radio=true,checked_func=function() return view.enabled~=true or not shelf_filter_has_selection(view) end,keep_menu_open=true,callback=function()
             write(function(f) f.enabled=false end)
         end},
-        {text="指定分组",post_text="只允许选中的分组进入觅阅",radio=true,checked_func=function() return view.enabled==true end,keep_menu_open=true,callback=function()
+        {text="指定分组",post_text="至少选择一个分组后生效",radio=true,checked_func=function() return view.enabled==true and shelf_filter_has_selection(view) end,keep_menu_open=true,callback=function()
             write(function(f) f.enabled=true end)
         end},
     }
     if #groups==0 then
-        rows[#rows+1]={text="暂无可用分组",post_text="刷新微信书架后更新",enabled=false}
+        rows[#rows+1]={text="暂无可用分组",post_text="没有分组时显示全部微信书架",enabled=false}
     else
         for _,group in ipairs(groups) do
             local item=group
@@ -24451,9 +24671,11 @@ function Plugin:shelf_filter_settings_menu()
                         if selected then
                             if name~="" then f.archives[name]=nil end
                             if key~="" then f.archive_keys[key]=nil end
+                            if not shelf_filter_has_selection(f) then f.enabled=false end
                         else
                             if name~="" then f.archives[name]=true end
                             if key~="" then f.archive_keys[key]=true end
+                            f.enabled=true
                         end
                     end)
                 end,
@@ -24471,12 +24693,9 @@ function Plugin:shelf_filter_settings_menu()
                 end
             end)
         end}
-        rows[#rows+1]={text="清空",post_text="保持指定分组模式，但暂不允许任何分组",keep_menu_open=true,callback=function()
-            write(function(f) f.enabled=true; f.archives={}; f.archive_keys={} end)
+        rows[#rows+1]={text="清空选择",post_text="清空后恢复全部微信书架",keep_menu_open=true,callback=function()
+            write(function(f) f.enabled=false; f.archives={}; f.archive_keys={} end)
         end}
-    end
-    if view.enabled==true and #self:_home_allowed_weread_groups()==0 then
-        rows[#rows+1]={text="当前没有已允许的有效分组",post_text="主页会保持空状态，不会回退到完整书架",enabled=false}
     end
     rows[#rows+1]={text="刷新微信书架与分组",post_text="从微信服务器重新校准",callback=function()
         self:toast("正在刷新微信书架与分组…",2)
@@ -26027,6 +26246,191 @@ function Plugin:_close_active_thought_popup(reason)
     end
 end
 
+-- Likes are the only web annotation feature without a Skill Gateway fallback, so
+-- a timed-out session shows up as a heart that silently does nothing while the
+-- bookshelf and comments still work. Say why. The notice is throttled, always
+-- optional and fully contained: it can never turn into a second failure path for
+-- the like itself, and it uses the plugin's own transient toast, which the reader
+-- return watcher ignores and which never closes the thought popup.
+function Plugin:_notify_online_like_auth_expired()
+    local now=monotonic_wall_time()
+    local last=tonumber(self._online_like_auth_notice_at)
+    if last and now-last<6 then return end
+    self._online_like_auth_notice_at=now
+    pcall(function() self:toast("微信读书登录已失效，请重新扫码登录后再点赞",3) end)
+end
+
+function Plugin:_online_like_account_key()
+    local auth=self.store:auth()
+    local account=type(auth.account)=="table" and auth.account or {}
+    local cookies=type(auth.cookies)=="table" and auth.cookies or {}
+    local account_id=U.trim(tostring(account.vid or ""))
+    if account_id=="" then account_id=U.trim(tostring(cookies.wr_vid or "")) end
+    return account_id.."|"..U.trim(tostring(auth.login_session_id or ""))
+end
+
+function Plugin:_online_like_state_cache()
+    local account_key=self:_online_like_account_key()
+    if self._online_like_state_account_key~=account_key then
+        self._online_like_state_account_key=account_key
+        self._online_like_states={}
+    end
+    self._online_like_states=self._online_like_states or {}
+    return self._online_like_states
+end
+
+function Plugin:_remember_online_like_state(account_key,review_id,is_liked,likes)
+    if account_key~=self:_online_like_account_key() then return end
+    review_id=U.trim(tostring(review_id or ""))
+    if review_id=="" then return end
+    self:_online_like_state_cache()[review_id]={
+        is_liked=is_liked==true,
+        likes=math.max(0,math.floor(tonumber(likes) or 0)),
+    }
+end
+
+function Plugin:_toggle_online_review_like(request,callback)
+    request=type(request)=="table" and request or {}
+    local review_id=U.trim(tostring(request.review_id or ""))
+    local function finish(value,err)
+        if callback then pcall(callback,value,err) end
+    end
+    if not self:_online_comment_likes_enabled() or review_id=="" then
+        finish(nil,"disabled")
+        return false
+    end
+    if self.interactive_network_async and self.interactive_network_async:busy() then
+        pcall(function() self:toast("其他网络操作正在进行，请稍后再点赞",2) end)
+        finish(nil,"busy")
+        return false
+    end
+
+    -- Every like runs in a fresh child process, so the Api-level annotation
+    -- circuit cannot survive between taps. Remember a confirmed session timeout
+    -- against the credential revision that produced it; otherwise each tap
+    -- spends a full request timeout plus a login renewal already known to fail,
+    -- and the heart looks unresponsive for tens of seconds. Any real credential
+    -- change bumps the revision, so a fresh login clears this on its own.
+    local revision=self.store:auth_revision()
+    if self._online_like_auth_dead==revision then
+        self:_notify_online_like_auth_expired()
+        finish(nil,"auth_expired")
+        return false
+    end
+
+    local auth=U.copy(self.store:auth())
+    local data_dir,temp_dir=self.store.data_dir,self.store.temp_dir
+    local known_is_liked=request.is_liked
+    if type(known_is_liked)~="boolean" then known_is_liked=nil end
+    local cached_likes=math.max(0,math.floor(tonumber(request.likes) or 0))
+    local like_account_key=self:_online_like_account_key()
+    local wire_context={bookId=request.book_id,chapterUid=request.chapter_uid}
+    local started,err=self:_run_interactive_network("review-like","review-like",function()
+        local HttpChild=require("miuread.http")
+        local ApiChild=require("miuread.api")
+        local ReaderChild=require("miuread.reader")
+        local child_store=interactive_child_store(auth,data_dir,temp_dir)
+        local child_http=HttpChild:new(child_store)
+        local child_reader=ReaderChild:new(child_http,child_store)
+        local child_api=ApiChild:new(child_http,child_store,child_reader)
+        local is_liked=known_is_liked
+        local likes=cached_likes
+        if is_liked==nil then
+            local state_ok,state=pcall(child_api.review_single,child_api,review_id,wire_context)
+            if not state_ok or type(state)~="table" then
+                local child_auth,auth_changed=child_store:snapshot()
+                return {request_ok=false,error=state_ok and "review state missing" or tostring(state),
+                    auth=child_auth,auth_changed=auth_changed}
+            end
+            local nested=type(state.review)=="table" and state.review or {}
+            local flag=rawget(nested,"isLike")
+            if flag==nil then flag=rawget(state,"isLike") end
+            if flag==nil then
+                local child_auth,auth_changed=child_store:snapshot()
+                return {request_ok=false,error="review like state missing",
+                    auth=child_auth,auth_changed=auth_changed}
+            end
+            is_liked=flag==true or tonumber(flag)==1 or tostring(flag):lower()=="true"
+            likes=math.max(0,math.floor(tonumber(rawget(state,"likesCount")
+                or rawget(nested,"likesCount") or likes) or 0))
+            -- The popup has no stored like state, so a reopened comment always
+            -- draws the empty heart and the first tap can only mean "like". When
+            -- the review turns out to be liked already, just report the official
+            -- state: dropping a like the reader gave earlier is far worse than
+            -- doing nothing, and the heart still ends up filled either way.
+            if is_liked==true then
+                local child_auth,auth_changed=child_store:snapshot()
+                return {request_ok=true,is_liked=true,likes=likes,synced_only=true,
+                    auth=child_auth,auth_changed=auth_changed}
+            end
+        end
+        local write_ok,write_result=pcall(
+            child_api.like_review,child_api,review_id,is_liked,wire_context
+        )
+        local child_auth,auth_changed=child_store:snapshot()
+        if not write_ok then
+            return {request_ok=false,error=tostring(write_result),auth=child_auth,auth_changed=auth_changed}
+        end
+        -- The Web reader only flips its own state once the response reports succ,
+        -- and it prefers the likesCount the response carries over a local guess.
+        -- A zero errCode alone does not mean the like was accepted, so a rejected
+        -- write must not be reported as a successful one. Both fields are treated
+        -- as optional: when the endpoint omits them the previous behaviour stands.
+        local response=type(write_result)=="table" and write_result or nil
+        local succ=response and rawget(response,"succ")
+        if succ~=nil and not (succ==true or tonumber(succ)==1 or tostring(succ):lower()=="true") then
+            return {request_ok=false,error="微信读书未接受本次点赞",
+                auth=child_auth,auth_changed=auth_changed}
+        end
+        local server_likes=response and tonumber(rawget(response,"likesCount")) or nil
+        if server_likes and server_likes<0 then server_likes=nil end
+        return {request_ok=true,is_liked=not is_liked,
+            likes=server_likes and math.max(0,math.floor(server_likes))
+                or math.max(0,likes+(is_liked and -1 or 1)),
+            server_count=server_likes~=nil,
+            auth=child_auth,auth_changed=auth_changed}
+    end,function(result)
+        local payload=result and result.ok==true and type(result.value)=="table" and result.value or nil
+        if payload and payload.auth_changed==true then
+            self:_apply_interactive_auth{auth=payload.auth,changed=true}
+        end
+        if not payload or payload.request_ok~=true then
+            local reason=tostring(payload and payload.error
+                or (result and result.error) or "network task failed")
+            -- Only the confirmed web-session timeout opens the circuit. Other
+            -- failures may be transient and must stay retryable.
+            local auth_code=tonumber(Http.auth_error_code(reason))
+            if auth_code==-2011 or auth_code==-2012 then
+                local dead_revision=self.store:auth_revision()
+                if self._online_like_auth_dead~=dead_revision then
+                    logger.warn("[MiuRead][ThoughtLike] likes paused; login session timed out",
+                        "code=",tostring(auth_code),"revision=",tostring(dead_revision))
+                end
+                self._online_like_auth_dead=dead_revision
+                self:_notify_online_like_auth_expired()
+            end
+            logger.warn("[MiuRead][ThoughtLike] request failed","review=",review_id,
+                "error=",reason)
+            finish(nil,payload and payload.error or "request failed")
+            return
+        end
+        self._online_like_auth_dead=nil
+        self:_remember_online_like_state(like_account_key,review_id,payload.is_liked,payload.likes)
+        logger.info("[MiuRead][ThoughtLike] updated","review=",review_id,
+            "liked=",tostring(payload.is_liked==true),"likes=",tostring(payload.likes),
+            "synced_only=",tostring(payload.synced_only==true),
+            "server_count=",tostring(payload.server_count==true))
+        finish({is_liked=payload.is_liked==true,likes=tonumber(payload.likes) or cached_likes})
+    end,{silent=true,timeout=35})
+    if not started then
+        local message=err=="offline" and "当前网络不可用，无法在线点赞"
+            or "暂时无法启动点赞请求，请稍后再试"
+        pcall(function() self:toast(message,2) end)
+        finish(nil,err)
+    end
+    return started
+end
+
 function Plugin:_open_thought_info(info,generation)
     if generation~=self._thought_popup_generation or not (self.ui and self.ui.document) then
         self:_finish_thought_popup(generation)
@@ -26048,6 +26452,30 @@ function Plugin:_open_thought_info(info,generation)
         local source,comments,count,native_cache_hit,native_signature=Thoughts.native_parts_cached(
             self.store,info.book_id,info.chapter_uid,info.range,group,token
         )
+        local like_state_signature={}
+        if prefs.online_likes==true then
+            local states=self:_online_like_state_cache()
+            local shared_comments=comments
+            local detached=false
+            for index,item in ipairs(comments or {}) do
+                local review_id=U.trim(tostring(item.review_id or ""))
+                local state=states[review_id]
+                -- beta.21 keeps both pieces of confirmed server state together.
+                -- Accept the old boolean shape defensively for a live hot-reload,
+                -- but new entries always carry is_liked + likes.
+                if type(state)=="boolean" or type(state)=="table" then
+                    local is_liked=type(state)=="table" and state.is_liked==true or state==true
+                    local likes=type(state)=="table" and tonumber(state.likes) or nil
+                    if not detached then comments=U.copy(shared_comments); detached=true end
+                    comments[index].is_liked=is_liked
+                    if likes~=nil then comments[index].likes=math.max(0,math.floor(likes)) end
+                    like_state_signature[#like_state_signature+1]=table.concat({
+                        review_id,is_liked and "1" or "0",
+                        likes~=nil and tostring(math.max(0,math.floor(likes))) or "?",
+                    },":")
+                end
+            end
+        end
         local parts_ms=math.floor((monotonic_wall_time()-parts_started)*1000+.5)
         if tostring(source or "")=="" and #(comments or {})==0 then notice="没有想法内容"; return end
         local show_started=monotonic_wall_time()
@@ -26059,6 +26487,7 @@ function Plugin:_open_thought_info(info,generation)
             cache_key=table.concat({
                 tostring(info.book_id or ""), tostring(info.chapter_uid or ""),
                 tostring(info.range or ""), tostring(native_signature or ""),
+                table.concat(like_state_signature,","),
             }, "|"),
             font_size=self:_thought_font_size(self:_thought_font_size_value(prefs)),
             font_name=self:_thought_font_name(prefs),
@@ -26067,8 +26496,16 @@ function Plugin:_open_thought_info(info,generation)
             is_favorite_callback=favorite_callbacks.is_favorite,
             toggle_favorite_callback=favorite_callbacks.toggle_favorite,
             copy_callback=favorite_callbacks.copy,
+            online_likes_enabled=prefs.online_likes==true,
             on_close=on_close,
             on_interact=function() self:_mark_reader_busy(30) end,
+            on_like=function(request,done)
+                request=type(request)=="table" and request or {}
+                request.book_id=info.book_id
+                request.chapter_uid=info.chapter_uid
+                self:_mark_reader_busy(30)
+                return self:_toggle_online_review_like(request,done)
+            end,
             on_error=function()
                 self:info("评论显示失败，窗口已安全关闭。当前阅读位置不会丢失。")
             end,

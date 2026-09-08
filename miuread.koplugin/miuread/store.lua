@@ -8,6 +8,11 @@ local DownloadDatabase=require("miuread.download_database")
 local U=require("miuread.util")
 local Cookies=require("miuread.cookies")
 local logger=require("logger")
+local ok_socket,socket=pcall(require,"socket")
+local function store_perf_clock()
+    if ok_socket and socket and type(socket.gettime)=="function" then return socket.gettime() end
+    return os.clock()
+end
 local Store={}; Store.__index=Store
 -- ReaderUI and FileManager can keep separate plugin instances alive. They
 -- must share the live settings owner: flushing either independent snapshot
@@ -30,7 +35,7 @@ local defaults={
              annotations={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
              read_report={state="unknown",checked_at=0,error="",code="",failures=0,retry_at=0},
          }}},
- preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={},archive_keys={}},home_ui={enabled=false,layout_version=24,layout_style="desk",show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",lockscreen_provider="native",lockscreen_pending_provider="",lockscreen_dash_source="",lockscreen_native_snapshot={},page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="recent"},device={source="all",kind="all",locality="all",sort="recent"}},weread_group="all",action_items={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false},action_order={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"},action_layout_version=6,panel_items={wifi=true,bluetooth=false,rotate=true,mp=true,screenshot=false,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false},panel_order={"wifi","bluetooth","rotate","mp","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"},panel_layout_version=7,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
+ preferences={images=true,mp_images=false,shelf_covers=true,download_keep_awake=true,download_notice_enabled=false,download_complete_notice=true,download_reader_warning=true,download_reader_policy="ask",chapter_prefetch_enabled=true,chapter_continuous_enabled=true,download_dir="",shelf_section="account",account_shelf_kind="books",shelf_filter={enabled=false,archives={},archive_keys={}},shelf_group_hint={accounts={}},home_ui={enabled=false,layout_version=24,layout_style="desk",show_weread_stats=true,show_local_stats=true,display_size="standard",ui_font_mode="default",ui_font_face="",local_entry_root="",local_entry_version=1,local_browse_version=3,lockscreen_style="frame",lockscreen_last_native_style="frame",lockscreen_provider="native",lockscreen_pending_provider="",lockscreen_dash_source="",lockscreen_native_snapshot={},page_by_section={},source_order={"shelf","device","recent"},visible_sections={shelf=true,device=true,recent=true},library_layout_version=1,library_membership={},library_filters={shelf={source="all",kind="all",locality="all",sort="recent"},device={source="all",kind="all",locality="all",sort="recent"}},weread_group="all",action_items={refresh=true,search=true,downloads=true,sync=true,sleep=true,miuread_settings=true,all_books=false,history=false,file_manager=false,screenshot=false,extensions=false},action_order={"refresh","search","downloads","sync","sleep","miuread_settings","all_books","history","file_manager","screenshot","extensions"},action_layout_version=6,panel_items={wifi=true,bluetooth=false,rotate=true,mp=true,screenshot=false,full_refresh=true,downloads=false,sync=false,miuread_settings=false,koreader_settings=true,koreader_file_manager=false,return_koreader=true,quit=false,restart=true,sleep=true,reboot=false,poweroff=false},panel_order={"wifi","bluetooth","rotate","mp","screenshot","full_refresh","downloads","sync","miuread_settings","koreader_settings","koreader_file_manager","return_koreader","quit","restart","sleep","reboot","poweroff"},panel_layout_version=7,more_expanded=false,network_metadata_user_set=false,network_metadata=true},reader_ui={enabled=true,plugin_mode_enabled=false,show_title=false,show_status=false,show_recent=false,recent_actions={},edge_guard_enabled=true,edge_guard_percent=15,quick_layout_version=11,quick_items={toc=true,progress=true,search=true,back=true,font=true,spacing=true,page=true,comments=true,bookmark=true,highlight=true,thought=true,sync=true},quick_order={"toc","progress","search","back","font","spacing","page","comments","bookmark","highlight","thought","sync"}},notices={reader_download=true,low_battery=true,low_storage=true,full_refresh=true,lockscreen=true,mode_switch=true,mode_environment=true},mode_intro={pending_mode="plugin",pending_reason="first_install",last_confirmed_mode="",confirmed_at=0},memory_mode={enabled=false,previous_known=false,previous_ratio=false},performance_mode={enabled=false,auto_detect=true,last_prompt_at=0,reminders_disabled=false},time_display={mode="device",zone="Asia/Shanghai",offset_minutes=480},thoughts={enabled=true,online_likes=false,font_size=22,font_face="",follow_body_font=false,width_ratio=0.90,height_ratio=0.55,display_mode="native_compact_rounded"},annotation_sync={enabled=false,review_visibility="private",highlight_style=1,highlight_color=0,close_upload_enabled=true},update={manifest=Config.UPDATE_MANIFEST,auto_check=true,interval=Config.AUTO_UPDATE_INTERVAL,last_attempt_at=0,last_success_at=0,last_prompted_version="",restart_mode="ask"},sync={time_enabled=true,progress_enabled=true,progress_mode="close",success_notice_enabled=false,error_notice_enabled=true,manual_only=false,auto_upload=false,pull_on_open=true,check_resume=false,require_verified=false,interval=Config.READ_INTERVAL,idle_timeout=Config.IDLE_TIMEOUT,threshold=Config.REMOTE_THRESHOLD,resume_after=300}},
  library={},sessions={},shelf_cache={raw_books={},raw_mp={},books={},mp={},groups={updated_at=0,authoritative=false,list={},book_groups={}},effective_scope={mode="all",fingerprint="all",updated_at=0},updated_at=0,stream={enabled=false,ids={},hydrated_ids={},total=0,source="",updated_at=0}},cover_index={},cover_guard={active=false,started_at=0,stage="",version=""},update_state={},
  pending_installs={},last_cleanup_result={},read_report_consumed={},recent_reads={version=1,items={}},
  prefetch_cache={},
@@ -144,9 +149,47 @@ local function promote_complete_context_catalog(library,id,row)
     return false
 end
 
+-- beta.19: `.sources` is an in-memory diagnostic fan-out attached by the
+-- remote progress selector. It is not durable state and may recursively point
+-- back to web/agent snapshots. Strip it from existing sessions as well as new
+-- writes so old bloated settings are repaired once and cannot regrow.
+local function strip_persisted_progress_sources(value)
+    if type(value)~="table" or rawget(value,"sources")==nil then return value,0 end
+    local out={}
+    for key,item in pairs(value) do
+        if key~="sources" then out[key]=item end
+    end
+    return out,1
+end
+
+local function compact_progress_sources(row)
+    if type(row)~="table" then return 0 end
+    local removed=0
+    if type(row.remote)=="table" then
+        local cleaned,count=strip_persisted_progress_sources(row.remote)
+        row.remote=cleaned; removed=removed+count
+        -- Conflict snapshots store web/agent directly rather than under sources.
+        for _,key in ipairs({"web","agent"}) do
+            if type(row.remote[key])=="table" then
+                local child,child_count=strip_persisted_progress_sources(row.remote[key])
+                row.remote[key]=child; removed=removed+child_count
+            end
+        end
+    end
+    if type(row.remote_sources)=="table" then
+        for _,key in ipairs({"web","agent"}) do
+            if type(row.remote_sources[key])=="table" then
+                local child,child_count=strip_persisted_progress_sources(row.remote_sources[key])
+                row.remote_sources[key]=child; removed=removed+child_count
+            end
+        end
+    end
+    return removed
+end
+
 local function compact_session_row(row,keep_chapters)
     if type(row)~="table" then return row,0 end
-    local removed=0
+    local removed=compact_progress_sources(row)
     if keep_chapters~=true and row.chapters~=nil then row.chapters=nil; removed=removed+1 end
     for _,field in ipairs({"legacy_report_context","report_context"}) do
         if type(row[field])=="table" then
@@ -364,7 +407,7 @@ function Store:new(options)
     -- real first-run/default/schema migration, and never turn a settings write
     -- failure into a plugin-load failure.
     if startup_dirty then
-        local flushed,flush_error=o:flush()
+        local flushed,flush_error=o:flush("startup_migration")
         if flushed~=true then
             logger.warn("[MiuRead][Store] startup settings flush skipped after failure",tostring(flush_error or "unknown"))
         end
@@ -1077,6 +1120,78 @@ function Store:migrate()
             logger.info("[MiuRead][Migration] schema 132 -> 133 done",
                 "lockscreen_provider=",provider,"native_style=",native)
         end
+        if schema<134 then
+            local sessions=self.db:readSetting("sessions",{}) or {}
+            local library=self.db:readSetting("library",{}) or {}
+            local compacted,updated_library,removed=compact_sessions_for_library(sessions,library,false)
+            self.db:saveSetting("sessions",compacted)
+            self.db:saveSetting("library",updated_library)
+            logger.info("[MiuRead][Migration] schema 133 -> 134 done",
+                "progress_source_fields_removed=",tostring(removed))
+        end
+        if schema<135 then
+            -- beta.20 repairs the 5.7 selected-group semantic regression.
+            -- Empty/stale selections return to the full shelf, while a valid
+            -- explicitly selected empty group is still allowed to show zero.
+            local preferences=self.db:readSetting("preferences",{}) or {}
+            preferences.shelf_filter=type(preferences.shelf_filter)=="table" and preferences.shelf_filter or {}
+            local filter=preferences.shelf_filter
+            filter.archives=type(filter.archives)=="table" and filter.archives or {}
+            filter.archive_keys=type(filter.archive_keys)=="table" and filter.archive_keys or {}
+            preferences.shelf_group_hint=type(preferences.shelf_group_hint)=="table" and preferences.shelf_group_hint or {accounts={}}
+            preferences.shelf_group_hint.accounts=type(preferences.shelf_group_hint.accounts)=="table" and preferences.shelf_group_hint.accounts or {}
+
+            local function has_selected(values)
+                for key,value in pairs(type(values)=="table" and values or {}) do
+                    if value==true and tostring(key or "")~="" then return true end
+                end
+                return false
+            end
+            local selected=has_selected(filter.archives) or has_selected(filter.archive_keys)
+            local cache=self.db:readSetting("shelf_cache",{}) or {}
+            local groups=type(cache.groups)=="table" and cache.groups or {}
+            local group_list=type(groups.list)=="table" and groups.list or {}
+            local authoritative=groups.authoritative==true
+            local valid_selection=false
+            if filter.enabled==true and selected and authoritative then
+                for _,group in ipairs(group_list) do
+                    local name,key=tostring(group.name or ""),tostring(group.key or "")
+                    if (name~="" and filter.archives[name]==true) or (key~="" and filter.archive_keys[key]==true) then
+                        valid_selection=true; break
+                    end
+                end
+            end
+
+            local recovered_reason=""
+            if filter.enabled==true and not selected then
+                filter.enabled=false
+                filter.archives={}
+                filter.archive_keys={}
+                filter.recovery_notice_pending="empty_selection"
+                recovered_reason="empty_selection"
+            elseif filter.enabled==true and selected and authoritative and not valid_selection then
+                filter.enabled=false
+                filter.archives={}
+                filter.archive_keys={}
+                filter.recovery_notice_pending="stale_selection"
+                recovered_reason="stale_selection"
+            end
+
+            local effective_selected=filter.enabled==true and (has_selected(filter.archives) or has_selected(filter.archive_keys))
+            local raw=type(cache.raw_books)=="table" and cache.raw_books or nil
+            local recovered_books=0
+            if not effective_selected and raw and #raw>0 then
+                cache.books=U.copy(raw)
+                cache.effective_scope={mode="all",fingerprint="all",updated_at=os.time()}
+                recovered_books=#raw
+            end
+            self.db:saveSetting("preferences",preferences)
+            self.db:saveSetting("shelf_cache",cache)
+            logger.info("[MiuRead][Migration] schema 134 -> 135 done",
+                "shelf_filter_recovery=",recovered_reason~="" and recovered_reason or "none",
+                "books_restored=",tostring(recovered_books),
+                "large_shelf_hint_threshold=100")
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
     end
@@ -1085,7 +1200,7 @@ function Store:get(k,d) local v=self.db:readSetting(k,nil); return v==nil and U.
 function Store:set(k,v)
     self.db:saveSetting(k,v)
     if self._migration_batch==true then return true end
-    return self:flush()
+    return self:flush("set:"..tostring(k))
 end
 function Store:set_deferred(k,v) self.db:saveSetting(k,v) end
 local function sanitized_auth(value)
@@ -1142,6 +1257,13 @@ function Store:save_auth(v,opt)
         incoming.auth_revision=current_revision+1
     else
         incoming.auth_revision=current_revision
+    end
+    -- Health-only read-report success updates happen every minute while reading.
+    -- Keep them live in the shared Store without forcing a full miuread.lua
+    -- rewrite. Credential changes are never eligible for deferred persistence.
+    if opt.deferred==true and not credentials_changed then
+        self.db:saveSetting("auth",incoming)
+        return true
     end
     return self:set("auth",incoming)
 end
@@ -1924,7 +2046,7 @@ function Store:save_session(id,patch,flush_now)
     end
     self.db:saveSetting("sessions",a)
     if flush_now~=false then
-        local saved,err=self:flush()
+        local saved,err=self:flush("session:"..k)
         return a[k],saved,err
     end
     return a[k],true
@@ -2145,7 +2267,9 @@ local function merge_newer_progress_sessions(memory_sessions,disk_sessions)
     return memory_sessions
 end
 
-function Store:flush()
+function Store:flush(reason)
+    local flush_started=store_perf_clock()
+    reason=tostring(reason or "direct")
     if not self.isolated then
         local disk_data=settings_file_data(self.settings_path)
         if type(disk_data)=="table" then
@@ -2196,16 +2320,22 @@ function Store:flush()
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
         if disk_ok then self.db=LuaSettings:open(self.settings_path) end
+        logger.warn("[MiuRead][StorePerf] full settings flush failed",
+            "reason=",reason,"elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+            "error=",tostring(err or "unknown"))
         return false,err
     end
 
-    local valid,reason=settings_file_valid(self.settings_path)
+    local valid,validation_reason=settings_file_valid(self.settings_path)
     if not valid then
-        logger.warn("[MiuRead][Store] atomic settings flush produced invalid file","reason=",tostring(reason))
+        logger.warn("[MiuRead][Store] atomic settings flush produced invalid file","reason=",tostring(validation_reason))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
         if disk_ok then self.db=LuaSettings:open(self.settings_path) end
-        return false,reason
+        logger.warn("[MiuRead][StorePerf] full settings flush failed",
+            "reason=",reason,"elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+            "error=",tostring(validation_reason or "validation_failed"))
+        return false,validation_reason
     end
     if not self.isolated then
         local backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
@@ -2214,6 +2344,10 @@ function Store:flush()
         end
         os.remove(previous_path)
     end
+    logger.info("[MiuRead][StorePerf] full settings flush",
+        "reason=",reason,
+        "elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+        "bytes=",tostring(U.file_size(self.settings_path) or 0))
     return true
 end
 function Store:reload()

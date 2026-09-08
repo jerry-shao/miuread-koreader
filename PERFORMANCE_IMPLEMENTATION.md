@@ -1,3 +1,12 @@
+# beta.19 阅读热路径说明
+
+- 60 秒 ReadReport 网络请求继续由后台服务执行。
+- 普通回执只更新内存；不再触发完整 Store flush。
+- SAFE pending 使用 `readtime-recovery-v1.json` 小型原子恢复记录，失败时完整 flush 兜底。
+- 300 秒 daemon snapshot 保留语义但非强制落盘；生命周期 force snapshot 保持原行为。
+- `read_report` 成功认证健康状态延迟持久化，凭据变化与其他认证通道仍立即保存。
+- 进度显示/上传精度不做节流。
+
 # 5.8.0-beta.6 / beta.7 性能实施矩阵
 
 本文件对应 #86/#87/#90/#71 的性能重构方案。beta.6 先隔离主页回归；beta.7 在 beta.6 上累积 Reader/ReadReport/功耗修复。

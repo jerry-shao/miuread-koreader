@@ -1,17 +1,17 @@
 {
-  "version": "5.8.0-beta.18",
-  "name": "觅阅 · 微信读书助手 5.8.0-beta.18 内测版",
+  "version": "5.8.0-beta.21",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.21 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip"
   ],
-  "size": 1947886,
-  "sha256": "f00b7e67ca3266e8d6a563d1465e30a0d17172fe3ce0cfe88d3bd2a89b0958a2",
-  "summary": "新增设备美化分类与 DashWallpaper 首页推荐，统一书籍封面、墨痕和 DashWallpaper 的锁屏切换；第三方壁纸安装、首次生成、失败回退和重启续接由觅阅统一处理。",
-  "notes": "设备美化首批加入 Appearance、墨痕、DashWallpaper、CoverProgress 与 Highlights Screensaver。锁屏壁纸现在可直接选择书籍封面、墨痕或 DashWallpaper；Dash 未安装时可安装并使用，首次必须先生成并验证有效壁纸，成功后才改变 KOReader 锁屏，失败保持原设置。切回书籍封面会恢复上次画框/完整/铺满样式。Android/不支持休眠的设备不强行接管锁屏。公众号继续只在下拉快捷工具栏。"
+  "size": 1960511,
+  "sha256": "952cd47646545e62ea32f7e1c9a52cf4aa6f204862ba15777983432a635f6e4b",
+  "summary": "新增划线评论在线点赞/取消点赞，修复 PR 合并配置冲突和点赞状态缓存，同时保持 beta20 书架与 beta19 同步性能优化。",
+  "notes": "合入 PR #72 在线评论点赞：默认关闭，可在“划线与评论”中开启；首次未知状态先读取微信读书官方状态，点赞/取消点赞以 succ 与 likesCount 为准，不进入批注离线队列，也不盲目重试。清理合并时重复的 preferences 默认表，并在真正生效的 beta20 配置中加入 online_likes=false；点赞内存状态同时保存 is_liked 与 likesCount，重开弹窗不会出现爱心和数字不一致。在线点赞关闭时恢复 beta20 原 partial 刷新，开启后才使用交互式 ui waveform。Schema 保持 135；Issue #105、100 本无分组提醒、阅读时长热路径、SAFE pending、精确进度与后台稳定性全部保留。"
 }

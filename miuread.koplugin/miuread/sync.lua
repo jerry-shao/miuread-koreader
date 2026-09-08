@@ -228,6 +228,21 @@ local function choose_remote_progress(web,agent,threshold)
     return selected
 end
 
+-- beta.19: progress source selection is rich in memory, but `.sources` is a
+-- diagnostic fan-out that can point back to the selected web/agent table. It
+-- must never cross the persistence boundary: repeated U.merge() calls otherwise
+-- grow sources->web/agent->sources chains and make miuread.lua progressively
+-- larger. This is deliberately shallow: only the synthetic top-level `sources`
+-- attachment is removed; all real cloud coordinates and response fields remain.
+local function strip_progress_sources(value)
+    if type(value)~="table" or rawget(value,"sources")==nil then return value end
+    local out={}
+    for key,item in pairs(value) do
+        if key~="sources" then out[key]=item end
+    end
+    return out
+end
+
 local function positions_match(submitted,remote,threshold)
     submitted=type(submitted)=="table" and submitted or {}
     remote=type(remote)=="table" and remote or {}
@@ -1989,8 +2004,8 @@ function Sync:remote(book_id, callback, options)
         if not detached then self.last_error=nil end
         if self.host.on_auth_channel_ok then pcall(self.host.on_auth_channel_ok,self.host,"progress") end
         self.store:save_session(book_id,{
-            remote=remote,
-            remote_sources={web=web,agent=agent},
+            remote=strip_progress_sources(remote),
+            remote_sources={web=strip_progress_sources(web),agent=strip_progress_sources(agent)},
             remote_checked_at=os.time(),
             remote_web_error=value.web_error,
             remote_agent_error=value.agent_error,
@@ -3540,6 +3555,126 @@ function Sync:_write_daemon_control(active, immediate, extra)
     return true
 end
 
+-- beta.19: keep crash-critical SAFE reading-time carry in a tiny atomic
+-- journal instead of rewriting the whole miuread.lua on every interval. A zero
+-- entry is a deliberate tombstone: it prevents an older settings snapshot from
+-- replaying seconds that were later submitted successfully but not followed by
+-- a full settings flush. Entries are bound to login session + account + book
+-- core map, so they can never cross an account or document identity boundary.
+function Sync:_readtime_recovery_path()
+    return tostring(self.store.data_dir or self.store.temp_dir or "").."/readtime-recovery-v1.json"
+end
+
+function Sync:_readtime_recovery_table()
+    local raw=U.read_file(self:_readtime_recovery_path(),true)
+    if not raw or raw=="" then return {version=1,entries={}},nil end
+    local ok,value=pcall(Json.decode,raw)
+    if not ok or type(value)~="table" then
+        return {version=1,entries={}},"invalid recovery journal"
+    end
+    value.version=1
+    value.entries=type(value.entries)=="table" and value.entries or {}
+    return value,nil
+end
+
+function Sync:_readtime_recovery_identity(book_id,core_map_hash)
+    local auth=self.store:auth()
+    local account=type(auth.account)=="table" and auth.account or {}
+    return {
+        book_id=tostring(book_id or ""),
+        login_session_id=tostring(auth.login_session_id or ""),
+        account_vid=tostring(account.vid or ""),
+        core_map_hash=tostring(core_map_hash or ""),
+    }
+end
+
+function Sync:_readtime_recovery_matches(entry,identity)
+    return type(entry)=="table"
+        and tostring(entry.book_id or "")==tostring(identity.book_id or "")
+        and tostring(entry.login_session_id or "")==tostring(identity.login_session_id or "")
+        and tostring(entry.account_vid or "")==tostring(identity.account_vid or "")
+        and tostring(entry.core_map_hash or "")==tostring(identity.core_map_hash or "")
+end
+
+function Sync:_load_readtime_recovery(book_id,core_map_hash)
+    local data,read_error=self:_readtime_recovery_table()
+    local key=tostring(book_id or "")
+    local entry=type(data.entries)=="table" and data.entries[key] or nil
+    if entry~=nil then
+        local identity=self:_readtime_recovery_identity(book_id,core_map_hash)
+        if self:_readtime_recovery_matches(entry,identity) then
+            local seconds=entry.pending_report_safe==true
+                and math.max(0,math.floor(tonumber(entry.pending_report_seconds) or 0)) or 0
+            return seconds,true,read_error
+        end
+        -- A journal entry for the same book but another login/core is an
+        -- authoritative boundary: never fall back to an older session debt.
+        return 0,true,"stale recovery identity"
+    end
+    return 0,false,read_error
+end
+
+function Sync:_write_readtime_recovery(book_id,pending_seconds,core_map_hash)
+    local identity=self:_readtime_recovery_identity(book_id,core_map_hash)
+    if identity.book_id=="" or identity.login_session_id=="" or identity.account_vid=="" or identity.core_map_hash=="" then
+        return false,"incomplete recovery identity"
+    end
+    local seconds=math.max(0,math.floor(tonumber(pending_seconds) or 0))
+    local data=self:_readtime_recovery_table()
+    data=type(data)=="table" and data or {version=1,entries={}}
+    data.version=1
+    data.entries=type(data.entries)=="table" and data.entries or {}
+    local current=data.entries[identity.book_id]
+    if self:_readtime_recovery_matches(current,identity)
+        and math.max(0,math.floor(tonumber(current.pending_report_seconds) or 0))==seconds
+        and (current.pending_report_safe==true)==(seconds>0) then
+        return true,"unchanged"
+    end
+    data.entries[identity.book_id]={
+        book_id=identity.book_id,
+        login_session_id=identity.login_session_id,
+        account_vid=identity.account_vid,
+        core_map_hash=identity.core_map_hash,
+        pending_report_seconds=seconds,
+        pending_report_safe=seconds>0,
+        updated_at=os.time(),
+    }
+    data.updated_at=os.time()
+    local written,write_error=U.atomic_write(self:_readtime_recovery_path(),Json.encode(data),true)
+    if written~=true then return false,write_error or "recovery journal write failed" end
+    return true,"written"
+end
+
+function Sync:_save_safe_pending_state(book_id,pending_seconds,core_map_hash)
+    book_id=tostring(book_id or "")
+    if book_id=="" then return false,"missing book id" end
+    local seconds=math.max(0,math.floor(tonumber(pending_seconds) or 0))
+    local saved=self.store:session(book_id) or {}
+    local session_changed=math.max(0,math.floor(tonumber(saved.pending_report_seconds) or 0))~=seconds
+        or (saved.pending_report_safe==true)~=(seconds>0)
+    if session_changed then
+        self.store:save_session(book_id,{
+            pending_report_seconds=seconds,
+            pending_report_safe=seconds>0,
+        },false)
+    end
+    local journal_ok,journal_state=self:_write_readtime_recovery(book_id,seconds,core_map_hash)
+    if journal_ok~=true then
+        -- Correctness wins over performance. If the tiny journal cannot be
+        -- persisted, fall back to beta.18's full settings flush for this critical
+        -- state so provably-unsent seconds are never lost or replayed wrongly.
+        local _,saved_ok,save_error=self.store:save_session(book_id,{
+            pending_report_seconds=seconds,
+            pending_report_safe=seconds>0,
+        },true)
+        logger.warn("[MiuRead][ReadReport] recovery journal fallback to full settings",
+            "book=",book_id,"journal_error=",tostring(journal_state or "unknown"),
+            "settings_saved=",tostring(saved_ok==true),"settings_error=",tostring(save_error or "-"))
+        return saved_ok==true,save_error or journal_state
+    end
+    return true,journal_state
+end
+
 function Sync:_persist_daemon_session(force, explicit_book_id)
     local daemon = self.daemon
     local book_id = explicit_book_id or (daemon and (daemon.book_id or daemon.final_book_id))
@@ -3565,7 +3700,11 @@ function Sync:_persist_daemon_session(force, explicit_book_id)
         patch.report_login_session_id=tostring(daemon.login_session_id or "")
         patch.report_core_map_hash=tostring(daemon.core_map_hash or "")
     end
-    self.store:save_session(book_id,patch)
+    -- Non-forced snapshots remain useful to the live session, but beta.19 no
+    -- longer rewrites the entire settings file every 300 seconds. Lifecycle
+    -- boundaries (stop/suspend/final flush) still pass force=true and persist
+    -- the complete session exactly as before.
+    self.store:save_session(book_id,patch,force==true)
 end
 
 function Sync:_load_daemon_context()
@@ -3753,10 +3892,7 @@ function Sync:_import_daemon_status(force)
             and math.max(0,math.floor(tonumber(status.pending_elapsed or status.carry_remaining) or 0)) or 0
         self.pending_report_elapsed=pending_elapsed
         self.pending_report_status_at=tonumber(status.completed_at) or os.time()
-        self.store:save_session(status_book_id,{
-            pending_report_seconds=pending_elapsed,
-            pending_report_safe=pending_elapsed>0,
-        })
+        self:_save_safe_pending_state(status_book_id,pending_elapsed,tostring(daemon.core_map_hash or status.core_map_hash or ""))
     end
     if status.state == "service_waiting" or status.state == "inactive" then
         if final_flush then
@@ -3811,7 +3947,7 @@ function Sync:_import_daemon_status(force)
                 last_upload=self.last_upload,
                 last_elapsed=tonumber(status.elapsed_seconds),
                 last_report_reason=final_flush and tostring(status.flush_reason or "stop") or "interval",
-            })
+            },false)
         end
         if not final_flush and self.host.on_read_report_interval_success then
             pcall(self.host.on_read_report_interval_success,self.host,status)
@@ -3857,7 +3993,7 @@ function Sync:_import_daemon_status(force)
                 consecutive_failures=0,
                 report_state="unconfirmed",
                 report_recovery_state=status.context_refresh_requested==true and "refreshing_context" or nil,
-            })
+            },false)
             self:_clear_noncontext_repair_flag(status_book_id,saved,"daemon_unconfirmed")
         end
         if final_flush then
@@ -3890,7 +4026,7 @@ function Sync:_import_daemon_status(force)
                     last_error=self.last_error,last_error_kind=error_kind,
                     last_response_summary=status.response_summary or status.error,
                     report_state="time_only_failed",
-                })
+                },false)
             else
                 repair_required=self:_record_report_issue(status_book_id,error_kind,self.last_error,{suppress_prompt=false})
             end
@@ -4079,13 +4215,21 @@ function Sync:_start_daemon(reason)
     -- `pending_report_safe=true` is discarded because it may already have been
     -- accepted by WeRead and replaying it would double-count reading time.
     local carry_elapsed=0
+    local journal_pending,journal_authoritative,journal_note=self:_load_readtime_recovery(book_id,core_hash)
     local saved_pending=math.max(0,math.floor(tonumber(session.pending_report_seconds) or 0))
-    if session.pending_report_safe==true and saved_pending>0 then
+    if journal_authoritative then
+        carry_elapsed=math.max(0,math.floor(tonumber(journal_pending) or 0))
+        if tostring(journal_note or "")~="" and tostring(journal_note or "")~="unchanged" then
+            logger.info("[MiuRead][ReadReport] recovery journal authoritative",
+                "book=",book_id,"pending=",tostring(carry_elapsed),"state=",tostring(journal_note))
+        end
+    elseif session.pending_report_safe==true and saved_pending>0 then
+        -- One-time beta.18 migration path: import the old safe session debt into
+        -- the journal, then the journal becomes authoritative for later crashes.
         carry_elapsed=saved_pending
-    elseif saved_pending>0 or session.pending_report_safe==true then
-        self.store:save_session(book_id,{pending_report_seconds=0,pending_report_safe=false})
     end
     self.pending_report_elapsed=carry_elapsed
+    self:_save_safe_pending_state(book_id,carry_elapsed,core_hash)
     local existing_job=read_json_file(daemon.paths.job) or {}
     local same_account=tostring(existing_job.login_session_id or "")==login_session_id
         and math.max(0,tonumber(existing_job.auth_revision or 0) or 0)==auth_revision
