@@ -1,17 +1,17 @@
 {
-  "version": "5.8.0-beta.21",
-  "name": "觅阅 · 微信读书助手 5.8.0-beta.21 内测版",
+  "version": "5.8.0-beta.22",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.22 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.22/miuread-v5.8.0-beta.22-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.21/miuread-v5.8.0-beta.21-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.22/miuread-v5.8.0-beta.22-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.22/miuread-v5.8.0-beta.22-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.22/miuread-v5.8.0-beta.22-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.22/miuread-v5.8.0-beta.22-full.zip"
   ],
-  "size": 1960511,
-  "sha256": "952cd47646545e62ea32f7e1c9a52cf4aa6f204862ba15777983432a635f6e4b",
-  "summary": "新增划线评论在线点赞/取消点赞，修复 PR 合并配置冲突和点赞状态缓存，同时保持 beta20 书架与 beta19 同步性能优化。",
-  "notes": "合入 PR #72 在线评论点赞：默认关闭，可在“划线与评论”中开启；首次未知状态先读取微信读书官方状态，点赞/取消点赞以 succ 与 likesCount 为准，不进入批注离线队列，也不盲目重试。清理合并时重复的 preferences 默认表，并在真正生效的 beta20 配置中加入 online_likes=false；点赞内存状态同时保存 is_liked 与 likesCount，重开弹窗不会出现爱心和数字不一致。在线点赞关闭时恢复 beta20 原 partial 刷新，开启后才使用交互式 ui waveform。Schema 保持 135；Issue #105、100 本无分组提醒、阅读时长热路径、SAFE pending、精确进度与后台稳定性全部保留。"
+  "size": 1966729,
+  "sha256": "837bd9512794825441a4d3865c97151f7cf63e9744d3a0781115bca09b17f43e",
+  "summary": "正式纳入微信读书下载连接复用优化，减少整本下载过程中重复 TCP/TLS 握手，同时保持非下载网络行为、同步精度与后台稳定性不变。",
+  "notes": "合入 PR #73 下载连接复用：仅下载目录、阅读页上下文和章节正文分片显式启用 keepalive=true；登录、书架、阅读进度、阅读时长、批注与评论点赞继续使用原有网络行为。连接仅在响应可明确界定、对端未要求 close 且交换完整时回池，空闲 25 秒过期、单连接最多复用 64 次；网络恢复和限流冷却前、下载完成/取消/异常退出后主动清空连接池。复用连接失效时仅 GET/HEAD 可在未收到响应字节时透明重建一次，POST 不在连接池层重放。流式文件仍走独立连接，Config.HTTP_KEEPALIVE=false 可完整回退。Schema 保持 135，beta.21 在线点赞、beta.20 书架恢复与 100 本提醒、beta.19 阅读时长/SAFE pending/精确进度等全部保留。"
 }
