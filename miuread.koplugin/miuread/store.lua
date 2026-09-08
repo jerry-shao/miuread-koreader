@@ -8,6 +8,11 @@ local DownloadDatabase=require("miuread.download_database")
 local U=require("miuread.util")
 local Cookies=require("miuread.cookies")
 local logger=require("logger")
+local ok_socket,socket=pcall(require,"socket")
+local function store_perf_clock()
+    if ok_socket and socket and type(socket.gettime)=="function" then return socket.gettime() end
+    return os.clock()
+end
 local Store={}; Store.__index=Store
 -- ReaderUI and FileManager can keep separate plugin instances alive. They
 -- must share the live settings owner: flushing either independent snapshot
@@ -144,9 +149,47 @@ local function promote_complete_context_catalog(library,id,row)
     return false
 end
 
+-- beta.19: `.sources` is an in-memory diagnostic fan-out attached by the
+-- remote progress selector. It is not durable state and may recursively point
+-- back to web/agent snapshots. Strip it from existing sessions as well as new
+-- writes so old bloated settings are repaired once and cannot regrow.
+local function strip_persisted_progress_sources(value)
+    if type(value)~="table" or rawget(value,"sources")==nil then return value,0 end
+    local out={}
+    for key,item in pairs(value) do
+        if key~="sources" then out[key]=item end
+    end
+    return out,1
+end
+
+local function compact_progress_sources(row)
+    if type(row)~="table" then return 0 end
+    local removed=0
+    if type(row.remote)=="table" then
+        local cleaned,count=strip_persisted_progress_sources(row.remote)
+        row.remote=cleaned; removed=removed+count
+        -- Conflict snapshots store web/agent directly rather than under sources.
+        for _,key in ipairs({"web","agent"}) do
+            if type(row.remote[key])=="table" then
+                local child,child_count=strip_persisted_progress_sources(row.remote[key])
+                row.remote[key]=child; removed=removed+child_count
+            end
+        end
+    end
+    if type(row.remote_sources)=="table" then
+        for _,key in ipairs({"web","agent"}) do
+            if type(row.remote_sources[key])=="table" then
+                local child,child_count=strip_persisted_progress_sources(row.remote_sources[key])
+                row.remote_sources[key]=child; removed=removed+child_count
+            end
+        end
+    end
+    return removed
+end
+
 local function compact_session_row(row,keep_chapters)
     if type(row)~="table" then return row,0 end
-    local removed=0
+    local removed=compact_progress_sources(row)
     if keep_chapters~=true and row.chapters~=nil then row.chapters=nil; removed=removed+1 end
     for _,field in ipairs({"legacy_report_context","report_context"}) do
         if type(row[field])=="table" then
@@ -364,7 +407,7 @@ function Store:new(options)
     -- real first-run/default/schema migration, and never turn a settings write
     -- failure into a plugin-load failure.
     if startup_dirty then
-        local flushed,flush_error=o:flush()
+        local flushed,flush_error=o:flush("startup_migration")
         if flushed~=true then
             logger.warn("[MiuRead][Store] startup settings flush skipped after failure",tostring(flush_error or "unknown"))
         end
@@ -1077,6 +1120,15 @@ function Store:migrate()
             logger.info("[MiuRead][Migration] schema 132 -> 133 done",
                 "lockscreen_provider=",provider,"native_style=",native)
         end
+        if schema<134 then
+            local sessions=self.db:readSetting("sessions",{}) or {}
+            local library=self.db:readSetting("library",{}) or {}
+            local compacted,updated_library,removed=compact_sessions_for_library(sessions,library,false)
+            self.db:saveSetting("sessions",compacted)
+            self.db:saveSetting("library",updated_library)
+            logger.info("[MiuRead][Migration] schema 133 -> 134 done",
+                "progress_source_fields_removed=",tostring(removed))
+        end
         self.db:saveSetting("schema",Config.SCHEMA)
         self._migration_batch=false
     end
@@ -1085,7 +1137,7 @@ function Store:get(k,d) local v=self.db:readSetting(k,nil); return v==nil and U.
 function Store:set(k,v)
     self.db:saveSetting(k,v)
     if self._migration_batch==true then return true end
-    return self:flush()
+    return self:flush("set:"..tostring(k))
 end
 function Store:set_deferred(k,v) self.db:saveSetting(k,v) end
 local function sanitized_auth(value)
@@ -1142,6 +1194,13 @@ function Store:save_auth(v,opt)
         incoming.auth_revision=current_revision+1
     else
         incoming.auth_revision=current_revision
+    end
+    -- Health-only read-report success updates happen every minute while reading.
+    -- Keep them live in the shared Store without forcing a full miuread.lua
+    -- rewrite. Credential changes are never eligible for deferred persistence.
+    if opt.deferred==true and not credentials_changed then
+        self.db:saveSetting("auth",incoming)
+        return true
     end
     return self:set("auth",incoming)
 end
@@ -1924,7 +1983,7 @@ function Store:save_session(id,patch,flush_now)
     end
     self.db:saveSetting("sessions",a)
     if flush_now~=false then
-        local saved,err=self:flush()
+        local saved,err=self:flush("session:"..k)
         return a[k],saved,err
     end
     return a[k],true
@@ -2145,7 +2204,9 @@ local function merge_newer_progress_sessions(memory_sessions,disk_sessions)
     return memory_sessions
 end
 
-function Store:flush()
+function Store:flush(reason)
+    local flush_started=store_perf_clock()
+    reason=tostring(reason or "direct")
     if not self.isolated then
         local disk_data=settings_file_data(self.settings_path)
         if type(disk_data)=="table" then
@@ -2196,16 +2257,22 @@ function Store:flush()
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
         if disk_ok then self.db=LuaSettings:open(self.settings_path) end
+        logger.warn("[MiuRead][StorePerf] full settings flush failed",
+            "reason=",reason,"elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+            "error=",tostring(err or "unknown"))
         return false,err
     end
 
-    local valid,reason=settings_file_valid(self.settings_path)
+    local valid,validation_reason=settings_file_valid(self.settings_path)
     if not valid then
-        logger.warn("[MiuRead][Store] atomic settings flush produced invalid file","reason=",tostring(reason))
+        logger.warn("[MiuRead][Store] atomic settings flush produced invalid file","reason=",tostring(validation_reason))
         if not self.isolated then restore_settings_file(self.settings_path,self.settings_backup_path) end
         local disk_ok=settings_file_valid(self.settings_path)
         if disk_ok then self.db=LuaSettings:open(self.settings_path) end
-        return false,reason
+        logger.warn("[MiuRead][StorePerf] full settings flush failed",
+            "reason=",reason,"elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+            "error=",tostring(validation_reason or "validation_failed"))
+        return false,validation_reason
     end
     if not self.isolated then
         local backed_up,backup_error=U.copy_file(self.settings_path,self.settings_backup_path)
@@ -2214,6 +2281,10 @@ function Store:flush()
         end
         os.remove(previous_path)
     end
+    logger.info("[MiuRead][StorePerf] full settings flush",
+        "reason=",reason,
+        "elapsed_ms=",tostring(math.floor((store_perf_clock()-flush_started)*1000+0.5)),
+        "bytes=",tostring(U.file_size(self.settings_path) or 0))
     return true
 end
 function Store:reload()

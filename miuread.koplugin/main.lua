@@ -67,10 +67,35 @@ local SuspendWorkLease=require("miuread.suspend_work_lease")
 local PseudoLockscreen=require("miuread.pseudo_lockscreen")
 local Library=require("miuread.library")
 local ShelfView=require("miuread.shelf_view")
-local FullShelfView=require("miuread.full_shelf_view")
-local HomeView=require("miuread.home_view")
-local LocalBrowserView=require("miuread.local_browser_view")
-local HomeQuickPanel=require("miuread.home_quick_panel")
+-- Desktop-only UI modules are intentionally lazy. Reader mode should not parse
+-- or retain the full Home/shelf/browser/panel stack until one of those modules
+-- is actually used. The proxy preserves every existing `Module.method(...)`
+-- call site, and Lua's require cache makes the first real load permanent.
+-- Keep the helper on _G: main.lua is already close to LuaJIT's top-level local
+-- limit, so this avoids adding another local while retaining the same 4 module
+-- locals that beta.18 already had.
+function _G._miu_desktop_lazy(name,cold)
+    local module
+    return setmetatable({}, { __index = function(_, key)
+        -- Reuse a module loaded by the other MiuRead foreground instance, but
+        -- keep cheap "is it open?" probes cold when nobody has loaded it yet.
+        module=module or package.loaded[name]
+        if module~=nil then return module[key] end
+        if type(cold)=="table" and cold[key]~=nil then return cold[key] end
+        module=require(name)
+        return module[key]
+    end })
+end
+local FullShelfView=_G._miu_desktop_lazy("miuread.full_shelf_view")
+local HomeView=_G._miu_desktop_lazy("miuread.home_view",{
+    is_shown=function() return false end,current=function() return nil end,
+    prune_duplicates=function() return false end,close=function() return false end,
+    suspend=function() return false end,
+})
+local LocalBrowserView=_G._miu_desktop_lazy("miuread.local_browser_view")
+local HomeQuickPanel=_G._miu_desktop_lazy("miuread.home_quick_panel",{
+    close=function() return false end,refreshFrontlight=function() return false end,
+})
 local ActionSheet=require("miuread.action_sheet")
 local TransientGuard=require("miuread.transient_guard")
 local ScreenshotMode=require("miuread.screenshot_mode")
@@ -1469,10 +1494,10 @@ function Plugin:_auth_health()
     return U.merge({state="unknown",last_checked_at=0,last_ok_at=0,last_error_at=0,
         last_error_code="",last_error_message="",last_error_channel="",notice_pending=false,channels={}},auth.health or {})
 end
-function Plugin:_save_auth_health(health)
+function Plugin:_save_auth_health(health,deferred)
     local auth=self.store:auth()
     auth.health=health
-    self.store:save_auth(auth)
+    self.store:save_auth(auth,{deferred=deferred==true})
     return health
 end
 function Plugin:_recompute_auth_health(health)
@@ -1487,11 +1512,17 @@ function Plugin:_recompute_auth_health(health)
     health.state=partial and "partial" or (unknown and "unknown" or "ok")
     return health
 end
-function Plugin:_mark_auth_channel_ok(channel)
+function Plugin:_mark_auth_channel_ok(channel,deferred)
     if not self:logged_in() then return end
     local now=os.time()
     local health=self:_auth_health()
     health.channels=health.channels or {}
+    local previous=auth_row(health.channels[channel])
+    -- A repeated read_report "ok" only advances health timestamps and may stay
+    -- deferred. The first success, or recovery from an error/expired state, is
+    -- still persisted immediately so a crash cannot resurrect a stale auth
+    -- warning after the channel has actually recovered.
+    local health_only_repeat=deferred==true and tostring(previous.state or "") == "ok"
     health.channels[channel]={state="ok",checked_at=now,error="",code="",failures=0,retry_at=0,last_ok_at=now}
     health.last_checked_at=now
     health.last_ok_at=now
@@ -1503,7 +1534,7 @@ function Plugin:_mark_auth_channel_ok(channel)
         health.last_error_channel=""
         health.notice_pending=false
     end
-    self:_save_auth_health(health)
+    self:_save_auth_health(health,health_only_repeat)
 end
 function Plugin:_mark_auth_channel_error(channel,err,retry_at)
     if not self:logged_in() then return end
@@ -23824,7 +23855,11 @@ function Plugin:on_auth_required(channel,err)
     return marked
 end
 function Plugin:on_auth_channel_ok(channel)
-    self:_mark_auth_channel_ok(channel)
+    -- The read-report channel confirms every normal 60 s interval. Persisting
+    -- its health timestamp by rewriting the whole settings file would recreate
+    -- the very periodic stall beta.19 removes. Other channels keep their
+    -- existing immediate persistence because they are user/transaction driven.
+    self:_mark_auth_channel_ok(channel,tostring(channel or "")=="read_report")
 end
 
 function Plugin:on_read_report_ready()

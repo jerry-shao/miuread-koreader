@@ -54,7 +54,7 @@ package.preload['luasettings']=function()
 end
 package.preload['dump']=function() return function(v) return dump_table(v) end end
 package.preload['miuread.config']=function()
-    return {SCHEMA=132,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.13',
+    return {SCHEMA=134,MIN_SUPPORTED_SCHEMA=130,DATA_DIR='miuread-test',VERSION='5.8.0-beta.19',
         UPDATE_MANIFEST='',AUTO_UPDATE_INTERVAL=1,READ_INTERVAL=60,IDLE_TIMEOUT=60,REMOTE_THRESHOLD=3}
 end
 package.preload['miuread.json']=function() return {encode=function() return '{}' end,decode=function() return {} end} end
@@ -107,6 +107,8 @@ SEED={
             chapters=copy(chapters),psvts='p',token='t',pending_progress={chapter_uid='u8',canonical_offset=33,progress=5,safe=true},
             legacy_report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),psvts='p',token='t',junk=deep},
             report_context={book_id='book1',catalog_complete=true,chapters=copy(chapters),reader_url='https://example',junk=deep},
+            remote={progress=5,chapter_uid='u8',sources={web={progress=5,sources={web={progress=5}}},agent={progress=4}}},
+            remote_sources={web={progress=5,sources={web={progress=5}}},agent={progress=4,sources={agent={progress=4}}}},
         },
         book2={progress_upload_state='unconfirmed',progress_upload_at=os.time()-5,pending_progress={chapter_uid='b',canonical_offset=100,progress=75,safe=true},pending_report_seconds=50},
     },
@@ -121,6 +123,8 @@ assert(row.legacy_report_context.junk==nil,'deep legacy diagnostic survived comp
 assert(type(row.report_context)=='table' and row.report_context.junk==nil,'deep report diagnostic survived compaction')
 assert(row.psvts=='p' and row.token=='t','required scalar session context was lost')
 assert(type(row.pending_progress)=='table' and row.pending_progress.chapter_uid=='u8','pending exact progress was lost')
+assert(type(row.remote)=='table' and row.remote.sources==nil and row.remote.progress==5,'schema134 did not strip historical remote.sources safely')
+assert(type(row.remote_sources)=='table' and row.remote_sources.web.sources==nil and row.remote_sources.agent.sources==nil,'schema134 did not strip historical remote_sources child fan-out')
 assert(#st:get('library',{}).book1.catalog==320,'canonical library catalog was damaged')
 
 -- Future writes cannot grow the duplicate catalog back.
@@ -128,6 +132,10 @@ st:save_session('book1',{chapters=copy(chapters),legacy_report_context={book_id=
 row=assert(st:session('book1'))
 assert(row.chapters==nil and row.legacy_report_context.chapters==nil,'save_session reintroduced duplicate chapter catalogs')
 assert(row.legacy_report_context.psvts=='new','sanitizer removed a required context field')
+st:save_session('book1',{remote={progress=8,sources={web={progress=8}}},remote_sources={web={progress=8,sources={web={progress=8}}},agent={progress=7,sources={agent={progress=7}}}}},false)
+row=assert(st:session('book1'))
+assert(row.remote.sources==nil and row.remote.progress==8,'future save_session reintroduced remote.sources')
+assert(row.remote_sources.web.sources==nil and row.remote_sources.agent.sources==nil,'future save_session reintroduced remote_sources fan-out')
 local b2=assert(st:get('library',{}).book2)
 assert(b2.catalog_complete==true and b2.catalog_chapter_count==2,'schema132 did not promote hash-verified partial catalog')
 assert(b2.variants.clean.read_report_enabled==true,'schema132 did not re-enable safe time-only report for partial EPUB')
@@ -136,4 +144,4 @@ assert(s2.progress_upload_state=='submitted','legacy unconfirmed progress was no
 assert((tonumber(s2.pending_report_seconds) or 0)==0 and s2.pending_report_safe==false,'legacy uncertain reading-time debt was replayable after migration')
 local loader,err=loadfile(TMP..'/settings.lua'); assert(loader,err)
 local ok,data=pcall(loader); assert(ok and type(data)=='table','compacted settings file is not valid Lua')
-print('store session compaction + schema132 progress migration: PASS')
+print('store compaction + schema134 progress-source migration: PASS')

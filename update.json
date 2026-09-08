@@ -1,17 +1,17 @@
 {
-  "version": "5.8.0-beta.18",
-  "name": "觅阅 · 微信读书助手 5.8.0-beta.18 内测版",
+  "version": "5.8.0-beta.19",
+  "name": "觅阅 · 微信读书助手 5.8.0-beta.19 内测版",
   "channel": "beta",
   "package_type": "full",
-  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
+  "package_url": "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.19/miuread-v5.8.0-beta.19-full.zip",
   "package_urls": [
-    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip",
-    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.18/miuread-v5.8.0-beta.18-full.zip"
+    "https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.19/miuread-v5.8.0-beta.19-full.zip",
+    "https://ghfast.top/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.19/miuread-v5.8.0-beta.19-full.zip",
+    "https://gh-proxy.com/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.19/miuread-v5.8.0-beta.19-full.zip",
+    "https://ghproxy.net/https://github.com/miumiupy98-art/miuread-koreader/releases/download/v5.8.0-beta.19/miuread-v5.8.0-beta.19-full.zip"
   ],
-  "size": 1947886,
-  "sha256": "f00b7e67ca3266e8d6a563d1465e30a0d17172fe3ce0cfe88d3bd2a89b0958a2",
-  "summary": "新增设备美化分类与 DashWallpaper 首页推荐，统一书籍封面、墨痕和 DashWallpaper 的锁屏切换；第三方壁纸安装、首次生成、失败回退和重启续接由觅阅统一处理。",
-  "notes": "设备美化首批加入 Appearance、墨痕、DashWallpaper、CoverProgress 与 Highlights Screensaver。锁屏壁纸现在可直接选择书籍封面、墨痕或 DashWallpaper；Dash 未安装时可安装并使用，首次必须先生成并验证有效壁纸，成功后才改变 KOReader 锁屏，失败保持原设置。切回书籍封面会恢复上次画框/完整/铺满样式。Android/不支持休眠的设备不强行接管锁屏。公众号继续只在下拉快捷工具栏。"
+  "size": 1964637,
+  "sha256": "4ebfdc5ce9e3ed3a7d9fa40ad51c4c3c908a2e3897451c847e1c8d3198b35d6f",
+  "summary": "修复正常阅读时由阅读时间回执和周期状态保存触发的整份设置写入；保留 beta.18 的 15/60 秒时长上传、异常恢复与精确进度，并阻止云端来源数据持续膨胀。",
+  "notes": "正常阅读时间上传不再每次重写整份 miuread.lua，固定 300 秒状态快照也不再强制整份写盘；明确未发送且可安全补报的阅读秒数改用独立小型恢复记录，写入失败会自动回退完整保存。关闭书籍、熄屏、退出、最终上传、账号/凭据变化仍可靠保存。Schema 升至 134 清理历史 sources 嵌套；主页四个大型界面按需加载。阅读进度算法、显示精度、15 秒首次和 60 秒后续阅读时长周期均不改变。"
 }
